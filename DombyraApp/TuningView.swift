@@ -1,9 +1,13 @@
 import SwiftUI
 
 struct TuningView: View {
-    enum TuningMode {
+    enum TuningMode: String, CaseIterable, Identifiable {
         case fourth
         case fifth
+
+        var id: String {
+            rawValue
+        }
 
         var upwardRatio: Double {
             switch self {
@@ -22,6 +26,15 @@ struct TuningView: View {
                 return "Fifth tuning"
             }
         }
+
+        var shortTitle: String {
+            switch self {
+            case .fourth:
+                return "Fourth"
+            case .fifth:
+                return "Fifth"
+            }
+        }
     }
 
     enum LockedString {
@@ -29,11 +42,7 @@ struct TuningView: View {
         case bottom
     }
 
-    private let tuningMode: TuningMode
-
-    init(tuningMode: TuningMode = .fourth) {
-        self.tuningMode = tuningMode
-    }
+    @Binding var tuningMode: TuningMode
 
     @EnvironmentObject private var detector: ToneDetector
     @State private var displayedFrequency: Double = 0
@@ -45,6 +54,7 @@ struct TuningView: View {
     @State var bottomStringFrequency: Double = 0
 
     private let pairingTolerance: Double = 2.0
+    private let highlightTolerance: Double = 0.6
 
     private var shouldHighlightTopString: Bool {
         guard lockedTopFrequency == nil,
@@ -52,7 +62,7 @@ struct TuningView: View {
               displayedFrequency > 0 else { return false }
 
         let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
-        return abs(displayedFrequency - expectedTopFrequency) <= pairingTolerance
+        return abs(displayedFrequency - expectedTopFrequency) <= highlightTolerance
     }
 
     private var shouldHighlightBottomString: Bool {
@@ -61,7 +71,7 @@ struct TuningView: View {
               displayedFrequency > 0 else { return false }
 
         let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
-        return abs(displayedFrequency - expectedBottomFrequency) <= pairingTolerance
+        return abs(displayedFrequency - expectedBottomFrequency) <= highlightTolerance
     }
 
     private func pairedFrequency(for frequency: Double, isTopString: Bool) -> Double {
@@ -81,8 +91,17 @@ struct TuningView: View {
         let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
         let difference = displayedFrequency - expectedTopFrequency
 
-        guard abs(difference) > pairingTolerance else { return nil }
+        guard abs(difference) > highlightTolerance else { return nil }
         return difference < 0 ? .raise : .lower
+    }
+
+    private var topStringDirectionProgress: Double {
+        guard lockedTopFrequency == nil,
+              let lockedBottomFrequency,
+              displayedFrequency > 0 else { return 0 }
+
+        let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
+        return directionProgress(for: displayedFrequency - expectedTopFrequency)
     }
 
     private var bottomStringDirectionIndicator: FrequencySliderView.DirectionIndicator? {
@@ -93,17 +112,40 @@ struct TuningView: View {
         let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
         let difference = displayedFrequency - expectedBottomFrequency
 
-        guard abs(difference) > pairingTolerance else { return nil }
+        guard abs(difference) > highlightTolerance else { return nil }
         return difference < 0 ? .raise : .lower
+    }
+
+    private var bottomStringDirectionProgress: Double {
+        guard lockedBottomFrequency == nil,
+              let lockedTopFrequency,
+              displayedFrequency > 0 else { return 0 }
+
+        let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
+        return directionProgress(for: displayedFrequency - expectedBottomFrequency)
+    }
+
+    private func directionProgress(for difference: Double) -> Double {
+        let falloffRange = pairingTolerance * 6
+        let normalizedDistance = min(abs(difference) / falloffRange, 1)
+        return 1 - normalizedDistance
     }
 
     var body: some View {
         VStack(spacing: 16) {
+            Picker("Tuning mode", selection: $tuningMode) {
+                ForEach(TuningMode.allCases) { mode in
+                    Text(mode.shortTitle)
+                        .tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
             Text(tuningMode.title)
                 .font(.headline)
 
             Text(displayedFrequency > 0
-                 ? "\(displayedFrequency, specifier: "%.1f") Hz"
+                 ? "\(displayedFrequency, specifier: "%.2f") Hz"
                  : "Listening...")
                 .font(.largeTitle)
 
@@ -114,7 +156,8 @@ struct TuningView: View {
                 stringID: .top,
                 displayedFrequency: displayedFrequency,
                 isHighlighted: shouldHighlightTopString,
-                directionIndicator: topStringDirectionIndicator
+                directionIndicator: topStringDirectionIndicator,
+                directionProgress: topStringDirectionProgress
             )
 
             FrequencySliderView(
@@ -124,16 +167,17 @@ struct TuningView: View {
                 stringID: .bottom,
                 displayedFrequency: displayedFrequency,
                 isHighlighted: shouldHighlightBottomString,
-                directionIndicator: bottomStringDirectionIndicator
+                directionIndicator: bottomStringDirectionIndicator,
+                directionProgress: bottomStringDirectionProgress
             )
 
             if let lockedTopFrequency {
-                Text("Top locked: \(lockedTopFrequency, specifier: "%.1f") Hz")
+                Text("Top locked: \(lockedTopFrequency, specifier: "%.2f") Hz")
                     .font(.subheadline)
             }
 
             if let lockedBottomFrequency {
-                Text("Bottom locked: \(lockedBottomFrequency, specifier: "%.1f") Hz")
+                Text("Bottom locked: \(lockedBottomFrequency, specifier: "%.2f") Hz")
                     .font(.subheadline)
             }
 
@@ -161,6 +205,6 @@ struct TuningView: View {
 }
 
 #Preview {
-	TuningView(tuningMode: .fourth)
-		.environmentObject(ToneDetector())
+    TuningView(tuningMode: .constant(.fourth))
+        .environmentObject(ToneDetector())
 }

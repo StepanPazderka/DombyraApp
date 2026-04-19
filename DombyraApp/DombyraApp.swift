@@ -4,24 +4,11 @@ import SwiftUI
 struct DombyraApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var toneDetector = ToneDetector()
+    @State private var tuningMode: TuningView.TuningMode = .fourth
 
     var body: some Scene {
         WindowGroup {
-            TabView {
-                TuningView(tuningMode: .fourth)
-                    .tabItem {
-                        Image(systemName: "circle.fill")
-                            .opacity(0)
-                        Text("Fourth")
-                    }
-
-                TuningView(tuningMode: .fifth)
-                    .tabItem {
-                        Image(systemName: "circle.fill")
-                            .opacity(0)
-                        Text("Fifth")
-                    }
-            }
+            TuningView(tuningMode: $tuningMode)
             .environmentObject(toneDetector)
             .task {
                 await startToneDetectorIfNeeded()
