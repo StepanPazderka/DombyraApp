@@ -22,8 +22,8 @@ struct FrequencySliderView: View {
 		}
 	}
 	
-	private enum Layout {
-		static let trackHeight: CGFloat = 4
+    private enum Layout {
+        static let trackHeight: CGFloat = 4
 		static let spacing: CGFloat = 6
 		static let iconWidth: CGFloat = 18
 		static let indicatorWidth: CGFloat = 2
@@ -32,8 +32,9 @@ struct FrequencySliderView: View {
 		static let flashBlurRadius: CGFloat = 8
 		static let initialArrowOffset: CGFloat = -12
 		static let finalArrowOffset: CGFloat = 12
-		static let arrowAnimationDuration: Double = 0.85
-		static let flashFadeInDuration: Double = 0.12
+        static let arrowAnimationDuration: Double = 0.85
+        static let sliderAnimationDuration: Double = 0.10
+        static let flashFadeInDuration: Double = 0.12
 		static let flashFadeOutDuration: Double = 0.45
 		static let flashPeakOpacity: Double = 0.9
 		static let indicatorHorizontalInset: CGFloat = 9
@@ -172,13 +173,15 @@ struct FrequencySliderView: View {
 					lockedFrequency = displayedFrequency
 				}
 			}
-			.onChange(of: frequency) {
-				if locked {
-					lockedFrequency = displayedFrequency
-				} else {
-					displayedFrequency = frequency
-				}
-			}
+                .onChange(of: frequency) {
+                    if locked {
+                        lockedFrequency = displayedFrequency
+                    } else {
+                        withAnimation(.linear(duration: Layout.sliderAnimationDuration)) {
+                            displayedFrequency = frequency
+                        }
+                    }
+                }
 			.onChange(of: activeLockedString) {
 				if !locked {
 					lockedFrequency = nil

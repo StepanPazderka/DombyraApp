@@ -27,8 +27,14 @@ final class ToneDetector: ObservableObject {
         case locked
     }
 
+    private enum LogDecision: String {
+        case pass
+        case hold
+        case reject
+    }
+
     private struct PitchCluster {
-        let center: Double
+        let representativeFrequency: Double
         let observations: [PitchObservation]
 
         var count: Int {
@@ -51,8 +57,8 @@ final class ToneDetector: ObservableObject {
     private var observations: [PitchObservation] = []
     private var trackerState: TrackerState = .idle
     private var lockedFrequency: Double?
-    private var smoothedFrequency: Double = 0
     private var lastValidObservationTime: TimeInterval?
+    private var lastLockedMatchTime: TimeInterval?
     private var noteOnsetTime: TimeInterval?
     private var lastRMSAboveThreshold = false
 
@@ -121,8 +127,8 @@ final class ToneDetector: ObservableObject {
         observations.removeAll()
         trackerState = .idle
         lockedFrequency = nil
-        smoothedFrequency = 0
         lastValidObservationTime = nil
+        lastLockedMatchTime = nil
         noteOnsetTime = nil
         lastRMSAboveThreshold = false
 
@@ -156,7 +162,7 @@ final class ToneDetector: ObservableObject {
         }
 
         guard sampleBuffer.count >= analysisFrameCount else {
-            publish(frequency: smoothedFrequency, amplitude: rms, state: trackerState)
+            publish(frequency: lockedFrequency ?? 0, amplitude: rms, state: trackerState)
             return
         }
 
@@ -171,11 +177,18 @@ final class ToneDetector: ObservableObject {
         )
 
         if let noteOnsetTime, now - noteOnsetTime < onsetIgnoreDuration {
-            log(rms: rms, detection: detection, published: smoothedFrequency, status: "attack_ignore")
-            publish(frequency: smoothedFrequency, amplitude: rms, state: trackerState)
+            log(
+                rms: rms,
+                detection: detection,
+                published: lockedFrequency ?? 0,
+                status: "attack_ignore",
+                decision: .reject
+            )
+            publish(frequency: lockedFrequency ?? 0, amplitude: rms, state: trackerState)
             return
         }
 
+        let observationAccepted = detection?.confidence ?? 0 >= minimumObservationConfidence
         if let detection, detection.confidence >= minimumObservationConfidence {
             let observation = PitchObservation(time: now, frequency: detection.frequency, confidence: detection.confidence)
             observations.append(observation)
@@ -185,35 +198,45 @@ final class ToneDetector: ObservableObject {
         observations.removeAll { now - $0.time > observationWindow }
 
         let trackedFrequency = updateTracker(now: now)
-        if let trackedFrequency {
-            if smoothedFrequency == 0 {
-                smoothedFrequency = trackedFrequency
-            } else {
-                let alpha = smoothingFactor(for: trackedFrequency)
-                smoothedFrequency = (alpha * trackedFrequency) + ((1 - alpha) * smoothedFrequency)
-            }
-        } else {
-            smoothedFrequency = 0
-        }
+        let publishedFrequency = trackedFrequency ?? 0
+        let decision = logDecision(
+            detection: detection,
+            observationAccepted: observationAccepted,
+            publishedFrequency: publishedFrequency
+        )
 
-        log(rms: rms, detection: detection, published: smoothedFrequency, status: trackerState.rawValue)
-        publish(frequency: smoothedFrequency, amplitude: rms, state: trackerState)
+        log(
+            rms: rms,
+            detection: detection,
+            published: publishedFrequency,
+            status: trackerState.rawValue,
+            decision: decision
+        )
+        publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
     }
 
     private func handleSilence(now: TimeInterval, rms: Double) {
         observations.removeAll { now - $0.time > observationWindow }
 
+        let publishedFrequency: Double
         if let lastValidObservationTime, now - lastValidObservationTime <= silenceHoldDuration {
-            let heldFrequency = lockedFrequency ?? strongestCluster(from: observations)?.center ?? smoothedFrequency
-            smoothedFrequency = (0.03 * heldFrequency) + (0.97 * smoothedFrequency)
+            let heldFrequency = lockedFrequency ?? strongestCluster(from: observations)?.representativeFrequency ?? 0
+            publishedFrequency = heldFrequency
+            publish(frequency: heldFrequency, amplitude: rms, state: trackerState)
         } else {
             trackerState = .idle
             lockedFrequency = nil
-            smoothedFrequency = 0
+            publishedFrequency = 0
+            publish(frequency: 0, amplitude: rms, state: trackerState)
         }
 
-        log(rms: rms, detection: nil, published: smoothedFrequency, status: "silence_\(trackerState.rawValue)")
-        publish(frequency: smoothedFrequency, amplitude: rms, state: trackerState)
+        log(
+            rms: rms,
+            detection: nil,
+            published: publishedFrequency,
+            status: "silence_\(trackerState.rawValue)",
+            decision: publishedFrequency > 0 ? .hold : .reject
+        )
     }
 
     private func updateNoteOnsetTracking(rms: Double, now: TimeInterval) {
@@ -251,21 +274,24 @@ final class ToneDetector: ObservableObject {
         case .idle:
             if cluster.count >= acquiringClusterCount {
                 trackerState = .acquiring
-                lockedFrequency = cluster.center
-                return cluster.center
+                lockedFrequency = cluster.representativeFrequency
+                lastLockedMatchTime = now
+                return cluster.representativeFrequency
             }
             return nil
 
         case .acquiring:
             if cluster.count >= lockedClusterCount && cluster.timeSpan >= lockedClusterTimeSpan {
                 trackerState = .locked
-                lockedFrequency = cluster.center
-                return cluster.center
+                lockedFrequency = cluster.representativeFrequency
+                lastLockedMatchTime = now
+                return cluster.representativeFrequency
             }
 
             if cluster.count >= acquiringClusterCount {
-                lockedFrequency = cluster.center
-                return cluster.center
+                lockedFrequency = cluster.representativeFrequency
+                lastLockedMatchTime = now
+                return cluster.representativeFrequency
             }
             return lockedFrequency
 
@@ -275,15 +301,23 @@ final class ToneDetector: ObservableObject {
                 return nil
             }
 
-            let deviationRatio = abs(cluster.center - lockedFrequency) / max(lockedFrequency, 1)
+            let deviationRatio = abs(cluster.representativeFrequency - lockedFrequency) / max(lockedFrequency, 1)
             if deviationRatio <= relockDistanceRatio {
-                self.lockedFrequency = cluster.center
-                return cluster.center
+                self.lockedFrequency = cluster.representativeFrequency
+                lastLockedMatchTime = now
+                return cluster.representativeFrequency
             }
 
             if cluster.count >= lockReplacementCount && cluster.timeSpan >= lockReplacementTimeSpan {
-                self.lockedFrequency = cluster.center
-                return cluster.center
+                self.lockedFrequency = cluster.representativeFrequency
+                lastLockedMatchTime = now
+                return cluster.representativeFrequency
+            }
+
+            if let lastLockedMatchTime, now - lastLockedMatchTime > 0.35, cluster.count >= acquiringClusterCount {
+                trackerState = .acquiring
+                self.lockedFrequency = cluster.representativeFrequency
+                return cluster.representativeFrequency
             }
 
             return lockedFrequency
@@ -296,13 +330,13 @@ final class ToneDetector: ObservableObject {
         for observation in observations {
             let tolerance = max(1.5, observation.frequency * clusterToleranceRatio)
 
-            if let index = clusters.firstIndex(where: { abs($0.center - observation.frequency) <= tolerance }) {
+            if let index = clusters.firstIndex(where: { abs($0.representativeFrequency - observation.frequency) <= tolerance }) {
                 var updatedObservations = clusters[index].observations
                 updatedObservations.append(observation)
-                let newCenter = weightedCenter(for: updatedObservations)
-                clusters[index] = PitchCluster(center: newCenter, observations: updatedObservations)
+                let representativeFrequency = representativeFrequency(for: updatedObservations)
+                clusters[index] = PitchCluster(representativeFrequency: representativeFrequency, observations: updatedObservations)
             } else {
-                clusters.append(PitchCluster(center: observation.frequency, observations: [observation]))
+                clusters.append(PitchCluster(representativeFrequency: observation.frequency, observations: [observation]))
             }
         }
 
@@ -323,16 +357,6 @@ final class ToneDetector: ObservableObject {
 
         guard !nearby.isEmpty else { return nil }
         return strongestCluster(from: nearby)
-    }
-
-    private func weightedCenter(for observations: [PitchObservation]) -> Double {
-        let totalWeight = observations.reduce(0.0) { $0 + $1.confidence }
-        guard totalWeight > .ulpOfOne else {
-            return observations.reduce(0.0) { $0 + $1.frequency } / Double(observations.count)
-        }
-
-        let weightedSum = observations.reduce(0.0) { $0 + ($1.frequency * $1.confidence) }
-        return weightedSum / totalWeight
     }
 
     private func publish(frequency: Double, amplitude: Double, state: TrackerState) {
@@ -365,17 +389,24 @@ final class ToneDetector: ObservableObject {
         }
     }
 
-    private func smoothingFactor(for frequency: Double) -> Double {
-        switch frequency {
-        case ..<110:
-            return 0.14
-        case ..<180:
-            return 0.18
-        case ..<260:
-            return 0.22
-        default:
-            return 0.26
+    private func representativeFrequency(for observations: [PitchObservation]) -> Double {
+        let sortedByTime = observations.sorted { $0.time < $1.time }
+        let sortedValues = sortedByTime.map(\.frequency).sorted()
+        let middleIndex = sortedValues.count / 2
+        let medianFrequency: Double
+
+        if sortedValues.count.isMultiple(of: 2) {
+            medianFrequency = (sortedValues[middleIndex - 1] + sortedValues[middleIndex]) / 2
+        } else {
+            medianFrequency = sortedValues[middleIndex]
         }
+
+        let tolerance = max(1.2, medianFrequency * 0.015)
+        if let newestNearMedian = sortedByTime.last(where: { abs($0.frequency - medianFrequency) <= tolerance }) {
+            return newestNearMedian.frequency
+        }
+
+        return sortedByTime.last?.frequency ?? medianFrequency
     }
 
     private func detectFrequencyYIN(
@@ -477,18 +508,47 @@ final class ToneDetector: ObservableObject {
         return Double(index) + offset
     }
 
-    private func log(rms: Double, detection: (frequency: Double, confidence: Double)?, published: Double, status: String) {
+    private func logDecision(
+        detection: (frequency: Double, confidence: Double)?,
+        observationAccepted: Bool,
+        publishedFrequency: Double
+    ) -> LogDecision {
+        guard let detection else {
+            return publishedFrequency > 0 ? .hold : .reject
+        }
+
+        guard observationAccepted else {
+            return .reject
+        }
+
+        guard publishedFrequency > 0 else {
+            return .hold
+        }
+
+        let tolerance = max(1.5, detection.frequency * clusterToleranceRatio)
+        return abs(publishedFrequency - detection.frequency) <= tolerance ? .pass : .hold
+    }
+
+    private func log(
+        rms: Double,
+        detection: (frequency: Double, confidence: Double)?,
+        published: Double,
+        status: String,
+        decision: LogDecision
+    ) {
         guard logDetections else { return }
 
-        let elapsedMilliseconds = Int(((Date().timeIntervalSinceReferenceDate - appStartTime) * 1000).rounded())
-        let detectedText = detection.map { String(format: "%.2f", $0.frequency) } ?? "nil"
+        let elapsedSeconds = Date().timeIntervalSinceReferenceDate - appStartTime
+        let detectedText = detection.map { String(format: "%.4f", $0.frequency) } ?? "nil"
+        let publishedText = published > 0 ? String(format: "%.4f", published) : "0.0000"
         let confidenceText = detection.map { String(format: "%.2f", $0.confidence) } ?? "nil"
         print(
             String(
-                format: "[ToneDetector] t=%dms detected=%@ published=%.2f rms=%.5f confidence=%@ observations=%d state=%@",
-                elapsedMilliseconds,
+                format: "[ToneDetector] t=%.2fs detected=%@ published=%@ ui=%@ rms=%.5f confidence=%@ observations=%d state=%@",
+                elapsedSeconds,
                 detectedText,
-                published,
+                publishedText,
+                decision.rawValue,
                 rms,
                 confidenceText,
                 observations.count,

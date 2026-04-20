@@ -42,19 +42,22 @@ struct TuningView: View {
 		case bottom
 	}
 	
-	@Binding var tuningMode: TuningMode
-	
-	@EnvironmentObject private var detector: ToneDetector
-	@State private var displayedFrequency: Double = 0
-	@State private var lockedTopFrequency: Double? = nil
-	@State private var lockedBottomFrequency: Double? = nil
-	@State private var activeLockedString: LockedString? = nil
+    @Binding var tuningMode: TuningMode
+    
+    @EnvironmentObject private var detector: ToneDetector
+    @State private var displayedFrequency: Double = 0
+    @State private var displayedFrequencyTextValue: Double = 0
+    @State private var lockedTopFrequency: Double? = nil
+    @State private var lockedBottomFrequency: Double? = nil
+    @State private var activeLockedString: LockedString? = nil
+    @State private var textAnimationTask: Task<Void, Never>?
 	
 	@State var topStringFrequency: Double = 0
 	@State var bottomStringFrequency: Double = 0
 	
-	private let pairingTolerance: Double = 2.0
-	private let highlightTolerance: Double = 0.6
+    private let pairingTolerance: Double = 2.0
+    private let highlightTolerance: Double = 0.6
+    private let animatedTextThreshold: Double = 50.0
 	
 	private var shouldHighlightTopString: Bool {
 		guard lockedTopFrequency == nil,
@@ -145,10 +148,10 @@ struct TuningView: View {
 			.ignoresSafeArea()
 			
 			VStack(spacing: 16) {
-				Text(displayedFrequency > 0
-					 ? "\(displayedFrequency, specifier: "%.2f") Hz"
-					 : "Listening...")
-				.font(.largeTitle)
+                Text(displayedFrequency > 0
+                     ? "\(displayedFrequencyTextValue, specifier: "%.2f") Hz"
+                     : "Listening...")
+                    .font(.largeTitle)
 				
 				FrequencySliderView(
 					frequency: $displayedFrequency,
@@ -199,23 +202,61 @@ struct TuningView: View {
 			.pickerStyle(.segmented)
 			.padding(.horizontal)
 		}
-		.onReceive(detector.$frequency) { newFrequency in
-			guard newFrequency > 0 else { return }
+        .onReceive(detector.$frequency) { newFrequency in
+            guard newFrequency > 0 else { return }
+
+            withAnimation(.linear(duration: 0.10)) {
+                displayedFrequency = newFrequency
+            }
+
+            animateFrequencyText(to: newFrequency)
+        }
+        .onChange(of: activeLockedString) {
+            if activeLockedString != .top {
+                lockedTopFrequency = nil
+            }
 			
-			withAnimation(.easeOut(duration: 0.18)) {
-				displayedFrequency = newFrequency
-			}
-		}
-		.onChange(of: activeLockedString) {
-			if activeLockedString != .top {
-				lockedTopFrequency = nil
-			}
-			
-			if activeLockedString != .bottom {
-				lockedBottomFrequency = nil
-			}
-		}
-	}
+            if activeLockedString != .bottom {
+                lockedBottomFrequency = nil
+            }
+        }
+        .onDisappear {
+            textAnimationTask?.cancel()
+        }
+    }
+
+    private func animateFrequencyText(to targetFrequency: Double) {
+        textAnimationTask?.cancel()
+
+        let startFrequency = displayedFrequencyTextValue
+        let delta = targetFrequency - startFrequency
+
+        guard abs(delta) < animatedTextThreshold else {
+            displayedFrequencyTextValue = targetFrequency
+            return
+        }
+
+        let stepCount = max(1, min(30, Int(abs(delta) * 3)))
+
+        textAnimationTask = Task {
+            for step in 1...stepCount {
+                guard !Task.isCancelled else { return }
+
+                let progress = Double(step) / Double(stepCount)
+                let nextValue = startFrequency + (delta * progress)
+
+                await MainActor.run {
+                    displayedFrequencyTextValue = nextValue
+                }
+
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+
+            await MainActor.run {
+                displayedFrequencyTextValue = targetFrequency
+            }
+        }
+    }
 }
 
 #Preview {
