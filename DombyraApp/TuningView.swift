@@ -51,6 +51,8 @@ struct TuningView: View {
     @State private var lockedBottomFrequency: Double? = nil
     @State private var activeLockedString: LockedString? = nil
     @State private var textAnimationTask: Task<Void, Never>?
+    @State private var hasStartedTopStringSearch = false
+    @State private var hasStartedBottomStringSearch = false
 	
 	@State var topStringFrequency: Double = 0
 	@State var bottomStringFrequency: Double = 0
@@ -58,20 +60,23 @@ struct TuningView: View {
     private let pairingTolerance: Double = 2.0
     private let highlightTolerance: Double = 0.6
     private let animatedTextThreshold: Double = 50.0
+    private let searchActivationTolerance: Double = 16.0
 	
-	private var shouldHighlightTopString: Bool {
-		guard lockedTopFrequency == nil,
-			  let lockedBottomFrequency,
-			  displayedFrequency > 0 else { return false }
+    private var shouldHighlightTopString: Bool {
+        guard lockedTopFrequency == nil,
+              let lockedBottomFrequency,
+              hasStartedTopStringSearch,
+              displayedFrequency > 0 else { return false }
 		
 		let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
 		return abs(displayedFrequency - expectedTopFrequency) <= highlightTolerance
 	}
 	
-	private var shouldHighlightBottomString: Bool {
-		guard lockedBottomFrequency == nil,
-			  let lockedTopFrequency,
-			  displayedFrequency > 0 else { return false }
+    private var shouldHighlightBottomString: Bool {
+        guard lockedBottomFrequency == nil,
+              let lockedTopFrequency,
+              hasStartedBottomStringSearch,
+              displayedFrequency > 0 else { return false }
 		
 		let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
 		return abs(displayedFrequency - expectedBottomFrequency) <= highlightTolerance
@@ -86,10 +91,11 @@ struct TuningView: View {
 		}
 	}
 	
-	private var topStringDirectionIndicator: FrequencySliderView.DirectionIndicator? {
-		guard lockedTopFrequency == nil,
-			  let lockedBottomFrequency,
-			  displayedFrequency > 0 else { return nil }
+    private var topStringDirectionIndicator: FrequencySliderView.DirectionIndicator? {
+        guard lockedTopFrequency == nil,
+              let lockedBottomFrequency,
+              hasStartedTopStringSearch,
+              displayedFrequency > 0 else { return nil }
 		
 		let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
 		let difference = displayedFrequency - expectedTopFrequency
@@ -98,19 +104,21 @@ struct TuningView: View {
 		return difference < 0 ? .raise : .lower
 	}
 	
-	private var topStringDirectionProgress: Double {
-		guard lockedTopFrequency == nil,
-			  let lockedBottomFrequency,
-			  displayedFrequency > 0 else { return 0 }
+    private var topStringDirectionProgress: Double {
+        guard lockedTopFrequency == nil,
+              let lockedBottomFrequency,
+              hasStartedTopStringSearch,
+              displayedFrequency > 0 else { return 0 }
 		
 		let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
 		return directionProgress(for: displayedFrequency - expectedTopFrequency)
 	}
 	
-	private var bottomStringDirectionIndicator: FrequencySliderView.DirectionIndicator? {
-		guard lockedBottomFrequency == nil,
-			  let lockedTopFrequency,
-			  displayedFrequency > 0 else { return nil }
+    private var bottomStringDirectionIndicator: FrequencySliderView.DirectionIndicator? {
+        guard lockedBottomFrequency == nil,
+              let lockedTopFrequency,
+              hasStartedBottomStringSearch,
+              displayedFrequency > 0 else { return nil }
 		
 		let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
 		let difference = displayedFrequency - expectedBottomFrequency
@@ -119,20 +127,55 @@ struct TuningView: View {
 		return difference < 0 ? .raise : .lower
 	}
 	
-	private var bottomStringDirectionProgress: Double {
-		guard lockedBottomFrequency == nil,
-			  let lockedTopFrequency,
-			  displayedFrequency > 0 else { return 0 }
+    private var bottomStringDirectionProgress: Double {
+        guard lockedBottomFrequency == nil,
+              let lockedTopFrequency,
+              hasStartedBottomStringSearch,
+              displayedFrequency > 0 else { return 0 }
 		
 		let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
 		return directionProgress(for: displayedFrequency - expectedBottomFrequency)
 	}
 	
-	private func directionProgress(for difference: Double) -> Double {
-		let falloffRange = pairingTolerance * 6
-		let normalizedDistance = min(abs(difference) / falloffRange, 1)
-		return 1 - normalizedDistance
-	}
+    private func directionProgress(for difference: Double) -> Double {
+        let falloffRange = pairingTolerance * 6
+        let normalizedDistance = min(abs(difference) / falloffRange, 1)
+        return 1 - normalizedDistance
+    }
+
+    private var topStringIdleIndicatorSymbol: String {
+        shouldAwaitTopStringInput ? "play.circle" : "lock.open"
+    }
+
+    private var bottomStringIdleIndicatorSymbol: String {
+        shouldAwaitBottomStringInput ? "play.circle" : "lock.open"
+    }
+
+    private var shouldAwaitTopStringInput: Bool {
+        lockedTopFrequency == nil && lockedBottomFrequency != nil && !hasStartedTopStringSearch
+    }
+
+    private var shouldAwaitBottomStringInput: Bool {
+        lockedBottomFrequency == nil && lockedTopFrequency != nil && !hasStartedBottomStringSearch
+    }
+
+    private func updateStringSearchState(for liveFrequency: Double, amplitude: Double) {
+        guard amplitude > 0.003 else { return }
+
+        if let lockedBottomFrequency, lockedTopFrequency == nil, !hasStartedTopStringSearch {
+            let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
+            if abs(liveFrequency - expectedTopFrequency) <= searchActivationTolerance {
+                hasStartedTopStringSearch = true
+            }
+        }
+
+        if let lockedTopFrequency, lockedBottomFrequency == nil, !hasStartedBottomStringSearch {
+            let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
+            if abs(liveFrequency - expectedBottomFrequency) <= searchActivationTolerance {
+                hasStartedBottomStringSearch = true
+            }
+        }
+    }
 	
 	var body: some View {
 		ZStack {
@@ -153,27 +196,29 @@ struct TuningView: View {
                      : "Listening...")
                     .font(.largeTitle)
 				
-				FrequencySliderView(
-					frequency: $displayedFrequency,
-					lockedFrequency: $lockedTopFrequency,
-					activeLockedString: $activeLockedString,
-					stringID: .top,
-					displayedFrequency: displayedFrequency,
-					isHighlighted: shouldHighlightTopString,
-					directionIndicator: topStringDirectionIndicator,
-					directionProgress: topStringDirectionProgress
-				)
+                    FrequencySliderView(
+                        frequency: $displayedFrequency,
+                        lockedFrequency: $lockedTopFrequency,
+                        activeLockedString: $activeLockedString,
+                        stringID: .top,
+                        displayedFrequency: displayedFrequency,
+                        isHighlighted: shouldHighlightTopString,
+                        directionIndicator: topStringDirectionIndicator,
+                        directionProgress: topStringDirectionProgress,
+                        idleIndicatorSymbol: topStringIdleIndicatorSymbol
+                    )
 				
-				FrequencySliderView(
-					frequency: $displayedFrequency,
-					lockedFrequency: $lockedBottomFrequency,
-					activeLockedString: $activeLockedString,
-					stringID: .bottom,
-					displayedFrequency: displayedFrequency,
-					isHighlighted: shouldHighlightBottomString,
-					directionIndicator: bottomStringDirectionIndicator,
-					directionProgress: bottomStringDirectionProgress
-				)
+                    FrequencySliderView(
+                        frequency: $displayedFrequency,
+                        lockedFrequency: $lockedBottomFrequency,
+                        activeLockedString: $activeLockedString,
+                        stringID: .bottom,
+                        displayedFrequency: displayedFrequency,
+                        isHighlighted: shouldHighlightBottomString,
+                        directionIndicator: bottomStringDirectionIndicator,
+                        directionProgress: bottomStringDirectionProgress,
+                        idleIndicatorSymbol: bottomStringIdleIndicatorSymbol
+                    )
 				
 				if let lockedTopFrequency {
 					Text("Top locked: \(lockedTopFrequency, specifier: "%.2f") Hz")
@@ -205,19 +250,28 @@ struct TuningView: View {
         .onReceive(detector.$frequency) { newFrequency in
             guard newFrequency > 0 else { return }
 
-            withAnimation(.linear(duration: 0.10)) {
-                displayedFrequency = newFrequency
-            }
-
+            displayedFrequency = newFrequency
             animateFrequencyText(to: newFrequency)
+        }
+        .onReceive(detector.$amplitude) { amplitude in
+            updateStringSearchState(for: detector.frequency, amplitude: amplitude)
         }
         .onChange(of: activeLockedString) {
             if activeLockedString != .top {
                 lockedTopFrequency = nil
             }
-			
+				
             if activeLockedString != .bottom {
                 lockedBottomFrequency = nil
+            }
+
+            if activeLockedString == .top {
+                hasStartedBottomStringSearch = false
+            } else if activeLockedString == .bottom {
+                hasStartedTopStringSearch = false
+            } else {
+                hasStartedTopStringSearch = false
+                hasStartedBottomStringSearch = false
             }
         }
         .onDisappear {
@@ -236,7 +290,7 @@ struct TuningView: View {
             return
         }
 
-        let stepCount = max(1, min(30, Int(abs(delta) * 3)))
+        let stepCount = max(1, min(18, Int(abs(delta) * 1.5)))
 
         textAnimationTask = Task {
             for step in 1...stepCount {
@@ -249,7 +303,7 @@ struct TuningView: View {
                     displayedFrequencyTextValue = nextValue
                 }
 
-                try? await Task.sleep(for: .milliseconds(10))
+                try? await Task.sleep(for: .milliseconds(4))
             }
 
             await MainActor.run {

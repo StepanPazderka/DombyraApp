@@ -33,7 +33,7 @@ struct FrequencySliderView: View {
 		static let initialArrowOffset: CGFloat = -12
 		static let finalArrowOffset: CGFloat = 12
         static let arrowAnimationDuration: Double = 0.85
-        static let sliderAnimationDuration: Double = 0.10
+        static let sliderAnimationDuration: Double = 0.05
         static let flashFadeInDuration: Double = 0.12
 		static let flashFadeOutDuration: Double = 0.45
 		static let flashPeakOpacity: Double = 0.9
@@ -45,13 +45,15 @@ struct FrequencySliderView: View {
 	@Binding var lockedFrequency: Double?
 	@Binding var activeLockedString: TuningView.LockedString?
 	let stringID: TuningView.LockedString
-	@State var displayedFrequency: Double
-	var topPadding: CGFloat = 10
-	var isHighlighted: Bool = false
-	var directionIndicator: DirectionIndicator? = nil
-	var directionProgress: Double = 0
-	@State private var flashOpacity: Double = 0
-	@State private var arrowLoopOffset: CGFloat = Layout.initialArrowOffset
+    @State var displayedFrequency: Double
+    var topPadding: CGFloat = 10
+    var isHighlighted: Bool = false
+    var directionIndicator: DirectionIndicator? = nil
+    var directionProgress: Double = 0
+    var idleIndicatorSymbol: String = "lock.open"
+    var successIndicatorSymbol: String = "checkmark.circle.fill"
+    @State private var flashOpacity: Double = 0
+    @State private var arrowLoopOffset: CGFloat = Layout.initialArrowOffset
 	
 	private var locked: Bool {
 		activeLockedString == stringID
@@ -82,9 +84,17 @@ struct FrequencySliderView: View {
 		accentColor ?? .primary
 	}
 	
-	private var lockIconName: String {
-		locked ? "lock" : "lock.open"
-	}
+    private var lockIconName: String {
+        if locked {
+            return "lock"
+        }
+
+        if isHighlighted {
+            return successIndicatorSymbol
+        }
+
+        return idleIndicatorSymbol
+    }
 	
 	private var indicatorOffset: CGFloat {
 		guard !locked, !isHighlighted else { return 0 }
