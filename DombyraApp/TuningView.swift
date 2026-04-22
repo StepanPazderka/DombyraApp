@@ -30,9 +30,9 @@ struct TuningView: View {
 		var shortTitle: String {
 			switch self {
 			case .fourth:
-				return "4:3"
+				return "оң бұрау"
 			case .fifth:
-				return "3:2"
+				return "теріс бұрау"
 			}
 		}
 	}
@@ -47,6 +47,7 @@ struct TuningView: View {
     @EnvironmentObject private var detector: ToneDetector
     @State private var displayedFrequency: Double = 0
     @State private var displayedFrequencyTextValue: Double = 0
+    @State private var rawDetectedFrequency: Double = 0
     @State private var lockedTopFrequency: Double? = nil
     @State private var lockedBottomFrequency: Double? = nil
     @State private var activeLockedString: LockedString? = nil
@@ -134,8 +135,28 @@ struct TuningView: View {
               displayedFrequency > 0 else { return 0 }
 		
 		let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
-		return directionProgress(for: displayedFrequency - expectedBottomFrequency)
-	}
+			return directionProgress(for: displayedFrequency - expectedBottomFrequency)
+		}
+
+    private var topStringParticleTuningProgress: Double {
+        guard lockedTopFrequency == nil,
+              let lockedBottomFrequency,
+              hasStartedTopStringSearch,
+              rawDetectedFrequency > 0 else { return -1 }
+
+        let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
+        return directionProgress(for: rawDetectedFrequency - expectedTopFrequency)
+    }
+
+    private var bottomStringParticleTuningProgress: Double {
+        guard lockedBottomFrequency == nil,
+              let lockedTopFrequency,
+              hasStartedBottomStringSearch,
+              rawDetectedFrequency > 0 else { return -1 }
+
+        let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
+        return directionProgress(for: rawDetectedFrequency - expectedBottomFrequency)
+    }
 	
     private func directionProgress(for difference: Double) -> Double {
         let falloffRange = pairingTolerance * 6
@@ -157,6 +178,17 @@ struct TuningView: View {
 
     private var shouldAwaitBottomStringInput: Bool {
         lockedBottomFrequency == nil && lockedTopFrequency != nil && !hasStartedBottomStringSearch
+    }
+
+    private var referenceFrequency: Double? {
+        switch activeLockedString {
+        case .top:
+            return lockedTopFrequency
+        case .bottom:
+            return lockedBottomFrequency
+        case nil:
+            return nil
+        }
     }
 
     private func updateStringSearchState(for liveFrequency: Double, amplitude: Double) {
@@ -191,13 +223,23 @@ struct TuningView: View {
 			.ignoresSafeArea()
 			
 			VStack(spacing: 16) {
-                Text(displayedFrequency > 0
-                     ? "\(displayedFrequencyTextValue, specifier: "%.2f") Hz"
-                     : "Listening...")
-                    .font(.largeTitle)
+                    VStack(spacing: 4) {
+                        Text(displayedFrequency > 0
+                             ? "\(displayedFrequencyTextValue, specifier: "%.2f") Hz"
+                             : "00.00 Hz")
+                            .font(.largeTitle)
+                            .opacity(displayedFrequency > 0 ? 1 : 0)
+
+                        Text(referenceFrequency.map { "\($0, specifier: "%.2f") Hz" } ?? "00.00 Hz")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.blue)
+                            .opacity(referenceFrequency == nil ? 0 : 1)
+                    }
 				
                     FrequencySliderView(
                         frequency: $displayedFrequency,
+                        particleFrequency: $rawDetectedFrequency,
                         lockedFrequency: $lockedTopFrequency,
                         activeLockedString: $activeLockedString,
                         stringID: .top,
@@ -205,11 +247,13 @@ struct TuningView: View {
                         isHighlighted: shouldHighlightTopString,
                         directionIndicator: topStringDirectionIndicator,
                         directionProgress: topStringDirectionProgress,
+                        particleTuningProgress: topStringParticleTuningProgress,
                         idleIndicatorSymbol: topStringIdleIndicatorSymbol
                     )
 				
                     FrequencySliderView(
                         frequency: $displayedFrequency,
+                        particleFrequency: $rawDetectedFrequency,
                         lockedFrequency: $lockedBottomFrequency,
                         activeLockedString: $activeLockedString,
                         stringID: .bottom,
@@ -217,20 +261,11 @@ struct TuningView: View {
                         isHighlighted: shouldHighlightBottomString,
                         directionIndicator: bottomStringDirectionIndicator,
                         directionProgress: bottomStringDirectionProgress,
+                        particleTuningProgress: bottomStringParticleTuningProgress,
                         idleIndicatorSymbol: bottomStringIdleIndicatorSymbol
                     )
 				
-				if let lockedTopFrequency {
-					Text("Top locked: \(lockedTopFrequency, specifier: "%.2f") Hz")
-						.font(.subheadline)
-				}
-				
-				if let lockedBottomFrequency {
-					Text("Bottom locked: \(lockedBottomFrequency, specifier: "%.2f") Hz")
-						.font(.subheadline)
-				}
-				
-				Color.clear
+					Color.clear
 					.frame(height: 1)
 			}
 			.padding()
@@ -252,6 +287,9 @@ struct TuningView: View {
 
             displayedFrequency = newFrequency
             animateFrequencyText(to: newFrequency)
+        }
+        .onReceive(detector.$rawFrequency) { newFrequency in
+            rawDetectedFrequency = newFrequency
         }
         .onReceive(detector.$amplitude) { amplitude in
             updateStringSearchState(for: detector.frequency, amplitude: amplitude)

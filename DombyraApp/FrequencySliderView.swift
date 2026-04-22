@@ -35,28 +35,41 @@ struct FrequencySliderView: View {
         static let arrowAnimationDuration: Double = 0.85
         static let sliderAnimationDuration: Double = 0.05
         static let flashFadeInDuration: Double = 0.12
-		static let flashFadeOutDuration: Double = 0.45
-		static let flashPeakOpacity: Double = 0.9
-		static let indicatorHorizontalInset: CGFloat = 9
-		static let frequencyRange: ClosedRange<Double> = 0...400
-	}
+			static let flashFadeOutDuration: Double = 0.45
+			static let flashPeakOpacity: Double = 0.9
+			static let indicatorHorizontalInset: CGFloat = 9
+			static let frequencyRange: ClosedRange<Double> = 0...400
+            static let particleLifetime: TimeInterval = 1.1
+            static let particleRiseDistance: CGFloat = 46
+            static let particleSize: CGFloat = 5
+            static let maxParticleCount = 12
+		}
+
+        private struct FrequencyParticle: Identifiable {
+            let id = UUID()
+            let frequency: Double
+            let tuningProgress: Double
+            let createdAt: Date
+        }
 	
-	@Binding var frequency: Double
-	@Binding var lockedFrequency: Double?
-	@Binding var activeLockedString: TuningView.LockedString?
+		@Binding var frequency: Double
+        @Binding var particleFrequency: Double
+		@Binding var lockedFrequency: Double?
+		@Binding var activeLockedString: TuningView.LockedString?
 	let stringID: TuningView.LockedString
     @State var displayedFrequency: Double
     var topPadding: CGFloat = 10
     var isHighlighted: Bool = false
     var directionIndicator: DirectionIndicator? = nil
     var directionProgress: Double = 0
+    var particleTuningProgress: Double = -1
     var idleIndicatorSymbol: String = "lock.open"
     var successIndicatorSymbol: String = "checkmark.circle.fill"
     @State private var flashOpacity: Double = 0
-    @State private var arrowLoopOffset: CGFloat = Layout.initialArrowOffset
-	
-	private var locked: Bool {
-		activeLockedString == stringID
+    @State private var frequencyParticles: [FrequencyParticle] = []
+		
+		private var locked: Bool {
+			activeLockedString == stringID
 	}
 	
 	private var accentColor: Color? {
@@ -96,23 +109,11 @@ struct FrequencySliderView: View {
         return idleIndicatorSymbol
     }
 	
-	private var indicatorOffset: CGFloat {
-		guard !locked, !isHighlighted else { return 0 }
-		
-		switch directionIndicator {
-		case .lower:
-			return -arrowLoopOffset
-		case .raise:
-			return arrowLoopOffset
-		case nil:
-			return 0
+            private func normalizedValue(for width: CGFloat, frequency: Double? = nil) -> (value: Double, xPosition: CGFloat) {
+                let sourceFrequency = frequency ?? displayedFrequency
+				let normalized = min(max(sourceFrequency / Layout.frequencyRange.upperBound, 0), 1)
+				return (normalized, normalized * width)
 		}
-	}
-	
-	private func normalizedValue(for width: CGFloat) -> (value: Double, xPosition: CGFloat) {
-		let normalized = min(max(displayedFrequency / Layout.frequencyRange.upperBound, 0), 1)
-		return (normalized, normalized * width)
-	}
 	
 	private func indicatorXPosition(for xPosition: CGFloat, width: CGFloat) -> CGFloat {
 		max(
@@ -121,42 +122,126 @@ struct FrequencySliderView: View {
 				xPosition - Layout.indicatorHorizontalInset,
 				width - Layout.iconWidth
 			)
-		)
-	}
-	
-	@ViewBuilder
-	private var indicatorIcon: some View {
-		if let directionIndicator, !locked, !isHighlighted {
-			Image(systemName: directionIndicator.systemName)
-				.font(.caption)
-				.foregroundStyle(sliderAccentColor)
-				.frame(width: Layout.iconWidth)
-				.offset(x: indicatorOffset)
-		} else {
-			Image(systemName: lockIconName)
-				.font(.caption)
+			)
+		}
+
+        private func arrowOffset(at date: Date, direction: DirectionIndicator) -> CGFloat {
+            let progress = date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: Layout.arrowAnimationDuration) / Layout.arrowAnimationDuration
+            let offset = Layout.initialArrowOffset + ((Layout.finalArrowOffset - Layout.initialArrowOffset) * progress)
+
+            switch direction {
+            case .lower:
+                return -offset
+            case .raise:
+                return offset
+            }
+        }
+		
+		@ViewBuilder
+		private var indicatorIcon: some View {
+			if let directionIndicator, !locked, !isHighlighted {
+                TimelineView(.animation) { timeline in
+                    Image(systemName: directionIndicator.systemName)
+                        .font(.caption)
+                        .foregroundStyle(sliderAccentColor)
+                        .frame(width: Layout.iconWidth)
+                        .offset(x: arrowOffset(at: timeline.date, direction: directionIndicator))
+                }
+			} else {
+				Image(systemName: lockIconName)
+					.font(.caption)
 				.foregroundStyle(sliderAccentColor)
 				.frame(width: Layout.iconWidth)
 		}
 	}
 	
-	private var flashOverlay: some View {
-		Circle()
-			.fill(sliderAccentColor.opacity(flashOpacity))
-			.frame(width: Layout.flashSize, height: Layout.flashSize)
-			.blur(radius: Layout.flashBlurRadius)
-	}
+		private var flashOverlay: some View {
+			Circle()
+				.fill(sliderAccentColor.opacity(flashOpacity))
+				.frame(width: Layout.flashSize, height: Layout.flashSize)
+				.blur(radius: Layout.flashBlurRadius)
+		}
+
+        private var shouldEmitFrequencyParticles: Bool {
+            !locked && particleTuningProgress >= 0
+        }
+
+        private var currentParticleTuningProgress: Double {
+            min(max(particleTuningProgress, 0), 1)
+        }
+
+        private func particleColor(for tuningProgress: Double) -> Color {
+            Color(
+                hue: 0.02 + (0.31 * min(max(tuningProgress, 0), 1)),
+                saturation: 0.90,
+                brightness: 0.95
+            )
+        }
+
+        private func particleProgress(for particle: FrequencyParticle, at date: Date) -> Double {
+            min(max(date.timeIntervalSince(particle.createdAt) / Layout.particleLifetime, 0), 1)
+        }
+
+        private func pruneExpiredParticles(now: Date = Date()) {
+            frequencyParticles.removeAll {
+                now.timeIntervalSince($0.createdAt) > Layout.particleLifetime
+            }
+        }
+
+        private func appendFrequencyParticle(frequency: Double) {
+            guard shouldEmitFrequencyParticles, frequency > 0 else { return }
+
+            let now = Date()
+            pruneExpiredParticles(now: now)
+            frequencyParticles.append(
+                FrequencyParticle(
+                    frequency: frequency,
+                    tuningProgress: currentParticleTuningProgress,
+                    createdAt: now
+                )
+            )
+
+            if frequencyParticles.count > Layout.maxParticleCount {
+                frequencyParticles.removeFirst(frequencyParticles.count - Layout.maxParticleCount)
+            }
+        }
+
+        private func frequencyParticleLayer(width: CGFloat) -> some View {
+            TimelineView(.animation) { timeline in
+                ZStack(alignment: .bottomLeading) {
+                    ForEach(frequencyParticles) { particle in
+                        let progress = particleProgress(for: particle, at: timeline.date)
+                        let xPosition = indicatorXPosition(
+                            for: normalizedValue(for: width, frequency: particle.frequency).xPosition,
+                            width: width
+                        ) + (Layout.iconWidth / 2)
+
+                        Circle()
+                            .fill(particleColor(for: particle.tuningProgress).opacity(1 - progress))
+                            .frame(width: Layout.particleSize, height: Layout.particleSize)
+                            .offset(
+                                x: xPosition - (Layout.particleSize / 2),
+                                y: -(Layout.indicatorHeight + Layout.particleRiseDistance * progress)
+                            )
+                    }
+                }
+            }
+            .allowsHitTesting(false)
+        }
 	
 	var body: some View {
 		GeometryReader { geometry in
 			let sliderPosition = normalizedValue(for: geometry.size.width)
 			
-			ZStack(alignment: .leading) {
-				Capsule()
-					.frame(height: Layout.trackHeight)
-				
-				VStack(spacing: Layout.spacing) {
-					indicatorIcon
+				ZStack(alignment: .leading) {
+					Capsule()
+						.frame(height: Layout.trackHeight)
+
+                    frequencyParticleLayer(width: geometry.size.width)
+					
+					VStack(spacing: Layout.spacing) {
+						indicatorIcon
 					
 					Rectangle()
 						.fill(sliderAccentColor)
@@ -183,36 +268,31 @@ struct FrequencySliderView: View {
 					lockedFrequency = displayedFrequency
 				}
 			}
-                .onChange(of: frequency) {
-                    if locked {
-                        lockedFrequency = displayedFrequency
-                    } else {
-                        withAnimation(.linear(duration: Layout.sliderAnimationDuration)) {
-                            displayedFrequency = frequency
-                        }
+	                .onChange(of: frequency) {
+	                    if locked {
+	                        lockedFrequency = displayedFrequency
+	                    } else {
+	                        withAnimation(.linear(duration: Layout.sliderAnimationDuration)) {
+	                            displayedFrequency = frequency
+	                        }
+	                    }
+	                }
+                    .onChange(of: particleFrequency) {
+                        appendFrequencyParticle(frequency: particleFrequency)
                     }
-                }
 			.onChange(of: activeLockedString) {
 				if !locked {
 					lockedFrequency = nil
 				}
 			}
-			.onChange(of: isHighlighted) { _, newValue in
-				guard newValue else { return }
-				triggerFlash()
-			}
-			.onAppear {
-				startArrowLoopIfNeeded()
-			}
-			.onChange(of: directionIndicator) {
-				startArrowLoopIfNeeded()
-			}
-			.onChange(of: isHighlighted) {
-				startArrowLoopIfNeeded()
-			}
-		}
-		.frame(height: 32)
-		.padding([.top, .bottom], topPadding)
+                .onChange(of: isHighlighted) { _, newValue in
+                    if newValue {
+                        triggerFlash()
+                    }
+                }
+				}
+				.frame(height: 32)
+				.padding([.top, .bottom], topPadding)
 	}
 	
 	private func triggerFlash() {
@@ -226,27 +306,7 @@ struct FrequencySliderView: View {
 			.easeOut(duration: Layout.flashFadeOutDuration)
 			.delay(Layout.flashFadeInDuration)
 		) {
-			flashOpacity = 0
-		}
-	}
-	
-	private func startArrowLoopIfNeeded() {
-		guard !locked, !isHighlighted, directionIndicator != nil else {
-			withAnimation(.none) {
-				arrowLoopOffset = 0
+				flashOpacity = 0
 			}
-			return
 		}
-		
-		withAnimation(.none) {
-			arrowLoopOffset = Layout.initialArrowOffset
-		}
-		
-		withAnimation(
-			.linear(duration: Layout.arrowAnimationDuration)
-			.repeatForever(autoreverses: false)
-		) {
-			arrowLoopOffset = Layout.finalArrowOffset
-		}
-	}
 }

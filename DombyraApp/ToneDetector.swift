@@ -19,9 +19,10 @@ import Combine
 /// The stabilization layer intentionally prefers continuity over raw accuracy.
 /// Small changes should move immediately, while octave jumps and one-off outliers
 /// must be confirmed before they are allowed to reach the UI.
-final class ToneDetector: ObservableObject {
-	@Published var frequency: Double = 0
-	@Published var amplitude: Double = 0
+	final class ToneDetector: ObservableObject {
+		@Published var frequency: Double = 0
+		@Published var rawFrequency: Double = 0
+		@Published var amplitude: Double = 0
 	
 	private let appStartTime = Date().timeIntervalSinceReferenceDate
 	
@@ -43,9 +44,9 @@ final class ToneDetector: ObservableObject {
 		case reject
 	}
 	
-	private struct PitchCluster {
-		let representativeFrequency: Double
-		let observations: [PitchObservation]
+		private struct PitchCluster {
+			let representativeFrequency: Double
+			let observations: [PitchObservation]
 		
 		var count: Int {
 			observations.count
@@ -57,9 +58,14 @@ final class ToneDetector: ObservableObject {
 		
 		var timeSpan: TimeInterval {
 			guard let first = observations.first, let last = observations.last else { return 0 }
-			return last.time - first.time
+				return last.time - first.time
+			}
 		}
-	}
+
+        private struct PluckSummary {
+            var frequency: Double
+            var score: Double
+        }
 	
 	@Published private(set) var debugState: String = TrackerState.idle.rawValue
 	
@@ -70,10 +76,11 @@ final class ToneDetector: ObservableObject {
 	private var trackerState: TrackerState = .idle
 	private var stableFrequency: Double?
 	private var lastPublishedFrequency: Double?
-	private var lastValidObservationTime: TimeInterval?
-	private var lastLockedMatchTime: TimeInterval?
-	private var noteOnsetTime: TimeInterval?
-	private var lastRMSAboveThreshold = false
+		private var lastValidObservationTime: TimeInterval?
+		private var lastLockedMatchTime: TimeInterval?
+		private var noteOnsetTime: TimeInterval?
+        private var currentPluckSummary: PluckSummary?
+		private var lastRMSAboveThreshold = false
 	
 	// MARK: - Tuning Parameters
 	
@@ -83,8 +90,8 @@ final class ToneDetector: ObservableObject {
 	
 	private let observationWindow: TimeInterval = 1.2
 	private let clusterWindow: TimeInterval = 0.85
-	private let silenceHoldDuration: TimeInterval = 0.7
-	private let onsetIgnoreDuration: TimeInterval = 0.05
+		private let silenceHoldDuration: TimeInterval = 0.7
+		private let onsetIgnoreDuration: TimeInterval = 0.05
 	
 	private let yinThreshold: Double = 0.12
 	private let minimumRMS: Double = 0.0025
@@ -152,16 +159,18 @@ final class ToneDetector: ObservableObject {
 			trackerState = .idle
 			stableFrequency = nil
 		lastPublishedFrequency = nil
-		lastValidObservationTime = nil
-		lastLockedMatchTime = nil
-		noteOnsetTime = nil
-		lastRMSAboveThreshold = false
+			lastValidObservationTime = nil
+			lastLockedMatchTime = nil
+			noteOnsetTime = nil
+            currentPluckSummary = nil
+			lastRMSAboveThreshold = false
 		
-		Task { @MainActor in
-			self.frequency = 0
-			self.amplitude = 0
-			self.debugState = TrackerState.idle.rawValue
-		}
+			Task { @MainActor in
+				self.frequency = 0
+				self.rawFrequency = 0
+				self.amplitude = 0
+				self.debugState = TrackerState.idle.rawValue
+			}
 	}
 	
 	// MARK: - Audio Processing
@@ -178,20 +187,22 @@ final class ToneDetector: ObservableObject {
 		
 		updateNoteOnsetTracking(rms: rms, now: now)
 		
-		if rms <= minimumRMS {
-			handleSilence(now: now, rms: rms)
-			return
-		}
+			if rms <= minimumRMS {
+                publishRawFrequency(0)
+				handleSilence(now: now, rms: rms)
+				return
+			}
 		
 		sampleBuffer.append(contentsOf: rawSamples)
 		if sampleBuffer.count > maxBufferedSamples {
 			sampleBuffer.removeFirst(sampleBuffer.count - maxBufferedSamples)
 		}
 		
-		guard sampleBuffer.count >= analysisFrameCount else {
+			guard sampleBuffer.count >= analysisFrameCount else {
+                publishRawFrequency(0)
 				publish(frequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
-			return
-		}
+				return
+			}
 		
 		let sampleRate = buffer.format.sampleRate
 		let analysisSamples = Array(sampleBuffer.suffix(analysisFrameCount))
@@ -206,6 +217,7 @@ final class ToneDetector: ObservableObject {
 				rawDetection,
 				referenceFrequency: stableFrequency ?? lastPublishedFrequency
 			)
+            publishRawFrequency(normalizedPitchDetection?.frequency ?? 0)
 		
 		// The initial transient after a pluck is the noisiest part of the signal.
 		// We keep publishing the previous stable value during that short window.
@@ -230,8 +242,16 @@ final class ToneDetector: ObservableObject {
 			
 			recentObservations.removeAll { now - $0.time > observationWindow }
 			
-			let trackedFrequency = updateTracker(now: now)
-			let publishedFrequency = currentPublishedFrequency(fallback: trackedFrequency)
+				let trackedFrequency = updateTracker(now: now)
+                if let trackedFrequency, observationAccepted {
+                    updatePluckSummary(
+                        frequency: trackedFrequency,
+                        rms: rms,
+                        confidence: normalizedPitchDetection?.confidence ?? 0
+                    )
+                }
+                let displayFrequency = displayFrequency(for: trackedFrequency, rms: rms)
+				let publishedFrequency = currentPublishedFrequency(fallback: displayFrequency)
 			let decision = logDecision(
 				detection: normalizedPitchDetection,
 				observationAccepted: observationAccepted,
@@ -249,21 +269,22 @@ final class ToneDetector: ObservableObject {
 	}
 	
 	private func handleSilence(now: TimeInterval, rms: Double) {
-		recentObservations.removeAll { now - $0.time > observationWindow }
-		
-		let publishedFrequency: Double
-		if let lastValidObservationTime, now - lastValidObservationTime <= silenceHoldDuration {
-			let heldFrequency = currentPublishedFrequency(
-				fallback: stableFrequency ?? strongestCluster(from: recentObservations)?.representativeFrequency
-			)
-			publishedFrequency = heldFrequency
-			publish(frequency: heldFrequency, amplitude: rms, state: trackerState)
-		} else {
-			trackerState = .idle
-			stableFrequency = nil
-			publishedFrequency = currentPublishedFrequency()
-			publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
-		}
+			recentObservations.removeAll { now - $0.time > observationWindow }
+			
+			let publishedFrequency: Double
+			if let lastValidObservationTime, now - lastValidObservationTime <= silenceHoldDuration {
+				let heldFrequency = currentPublishedFrequency(
+					fallback: currentPluckSummary?.frequency ?? stableFrequency ?? strongestCluster(from: recentObservations)?.representativeFrequency
+				)
+				publishedFrequency = heldFrequency
+				publish(frequency: heldFrequency, amplitude: rms, state: trackerState)
+			} else {
+				trackerState = .idle
+				stableFrequency = nil
+                currentPluckSummary = nil
+				publishedFrequency = currentPublishedFrequency()
+				publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
+			}
 		
 		log(
 			rms: rms,
@@ -274,15 +295,37 @@ final class ToneDetector: ObservableObject {
 		)
 	}
 	
-	private func updateNoteOnsetTracking(rms: Double, now: TimeInterval) {
-		let isAboveThreshold = rms > minimumRMS
-		if isAboveThreshold && !lastRMSAboveThreshold {
-			noteOnsetTime = now
-		} else if !isAboveThreshold {
-			noteOnsetTime = nil
+		private func updateNoteOnsetTracking(rms: Double, now: TimeInterval) {
+			let isAboveThreshold = rms > minimumRMS
+			if isAboveThreshold && !lastRMSAboveThreshold {
+				noteOnsetTime = now
+                currentPluckSummary = nil
+			} else if !isAboveThreshold {
+				noteOnsetTime = nil
+			}
+			lastRMSAboveThreshold = isAboveThreshold
 		}
-		lastRMSAboveThreshold = isAboveThreshold
-	}
+
+        private func updatePluckSummary(frequency: Double, rms: Double, confidence: Double) {
+            guard frequency > 0 else { return }
+
+            // The last frames of a plucked string often sag lower as amplitude dies.
+            // Use the strongest stable part of the pluck as the representative tone.
+            let score = rms * max(confidence, minimumObservationConfidence)
+            if let currentPluckSummary, currentPluckSummary.score >= score {
+                return
+            }
+
+            currentPluckSummary = PluckSummary(frequency: frequency, score: score)
+        }
+
+        private func displayFrequency(for trackedFrequency: Double?, rms: Double) -> Double {
+            guard let trackedFrequency else {
+                return currentPublishedFrequency(fallback: currentPluckSummary?.frequency ?? stableFrequency)
+            }
+
+            return trackedFrequency
+        }
 	
 	// MARK: - Pitch Tracking
 	
@@ -455,17 +498,23 @@ final class ToneDetector: ObservableObject {
 			.frequency
 	}
 	
-	private func publish(frequency: Double, amplitude: Double, state: TrackerState) {
-		if frequency > 0 {
-			lastPublishedFrequency = frequency
+        private func publish(frequency: Double, amplitude: Double, state: TrackerState) {
+			if frequency > 0 {
+				lastPublishedFrequency = frequency
+			}
+			
+			Task { @MainActor in
+				self.frequency = frequency
+				self.amplitude = amplitude
+				self.debugState = state.rawValue
+			}
 		}
-		
-		Task { @MainActor in
-			self.frequency = frequency
-			self.amplitude = amplitude
-			self.debugState = state.rawValue
-		}
-	}
+
+        private func publishRawFrequency(_ frequency: Double) {
+            Task { @MainActor in
+                self.rawFrequency = frequency
+            }
+        }
 	
 	private func currentPublishedFrequency(fallback: Double? = nil) -> Double {
 		if let fallback, fallback > 0 {
@@ -693,17 +742,17 @@ final class ToneDetector: ObservableObject {
 	) {
 		guard logDetections else { return }
 		
-		let elapsedSeconds = Date().timeIntervalSinceReferenceDate - appStartTime
-		let detectedText = detection.map { String(format: "%.4f", $0.frequency) } ?? "nil"
-		let publishedText = published > 0 ? String(format: "%.4f", published) : "0.0000"
-		let confidenceText = detection.map { String(format: "%.2f", $0.confidence) } ?? "nil"
-		print(
-			String(
-				format: "[ToneDetector] t=%.2fs detected=%@ published=%@ ui=%@ rms=%.5f confidence=%@ observations=%d state=%@",
-				elapsedSeconds,
-				detectedText,
-				publishedText,
-				decision.rawValue,
+			let elapsedMilliseconds = Int((Date().timeIntervalSinceReferenceDate - appStartTime) * 1000)
+			let detectedText = detection.map { String(format: "%.4f", $0.frequency) } ?? "nil"
+			let publishedText = published > 0 ? String(format: "%.4f", published) : "0.0000"
+			let confidenceText = detection.map { String(format: "%.2f", $0.confidence) } ?? "nil"
+			print(
+				String(
+					format: "[ToneDetector] t=%dms detected=%@ uiFrequency=%@ uiDecision=%@ rms=%.5f confidence=%@ observations=%d state=%@",
+					elapsedMilliseconds,
+					detectedText,
+					publishedText,
+					decision.rawValue,
 				rms,
 				confidenceText,
 				recentObservations.count,
