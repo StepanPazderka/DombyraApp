@@ -9,6 +9,16 @@ import Foundation
 import AVFoundation
 import Combine
 
+/// Live pitch detector for the tuner screen.
+///
+/// The class has three responsibilities:
+/// - collect microphone samples from `AVAudioEngine`
+/// - estimate raw pitch candidates with a YIN-style detector
+/// - stabilize those candidates into a UI-friendly published frequency
+///
+/// The stabilization layer intentionally prefers continuity over raw accuracy.
+/// Small changes should move immediately, while octave jumps and one-off outliers
+/// must be confirmed before they are allowed to reach the UI.
 final class ToneDetector: ObservableObject {
 	@Published var frequency: Double = 0
 	@Published var amplitude: Double = 0
@@ -53,15 +63,19 @@ final class ToneDetector: ObservableObject {
 	
 	@Published private(set) var debugState: String = TrackerState.idle.rawValue
 	
+	// MARK: - Runtime State
+	
 	private var sampleBuffer: [Float] = []
-	private var observations: [PitchObservation] = []
+	private var recentObservations: [PitchObservation] = []
 	private var trackerState: TrackerState = .idle
-	private var lockedFrequency: Double?
+	private var stableFrequency: Double?
 	private var lastPublishedFrequency: Double?
 	private var lastValidObservationTime: TimeInterval?
 	private var lastLockedMatchTime: TimeInterval?
 	private var noteOnsetTime: TimeInterval?
 	private var lastRMSAboveThreshold = false
+	
+	// MARK: - Tuning Parameters
 	
 	private let tapBufferSize: AVAudioFrameCount = 512
 	private let analysisFrameCount = 4096
@@ -91,9 +105,13 @@ final class ToneDetector: ObservableObject {
 	private let fastSwitchAttackWindow: TimeInterval = 0.45
 	private let logDetections = true
 	
+	// MARK: - Audio Engine
+	
 	private let engine = AVAudioEngine()
 	private let session = AVAudioSession.sharedInstance()
 	private var isRunning = false
+	
+	// MARK: - Lifecycle
 	
 	func start() async throws {
 		guard !isRunning else { return }
@@ -130,9 +148,9 @@ final class ToneDetector: ObservableObject {
 		isRunning = false
 		
 		sampleBuffer.removeAll()
-		observations.removeAll()
-		trackerState = .idle
-		lockedFrequency = nil
+			recentObservations.removeAll()
+			trackerState = .idle
+			stableFrequency = nil
 		lastPublishedFrequency = nil
 		lastValidObservationTime = nil
 		lastLockedMatchTime = nil
@@ -145,6 +163,8 @@ final class ToneDetector: ObservableObject {
 			self.debugState = TrackerState.idle.rawValue
 		}
 	}
+	
+	// MARK: - Audio Processing
 	
 	private func process(buffer: AVAudioPCMBuffer) {
 		guard let channelData = buffer.floatChannelData?[0] else { return }
@@ -169,7 +189,7 @@ final class ToneDetector: ObservableObject {
 		}
 		
 		guard sampleBuffer.count >= analysisFrameCount else {
-			publish(frequency: currentPublishedFrequency(fallback: lockedFrequency), amplitude: rms, state: trackerState)
+				publish(frequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
 			return
 		}
 		
@@ -182,63 +202,65 @@ final class ToneDetector: ObservableObject {
 			minFrequency: minDetectableFrequency,
 			maxFrequency: maxDetectableFrequency
 		)
-		let detection = normalizedDetection(
-			rawDetection,
-			referenceFrequency: lockedFrequency ?? lastPublishedFrequency
-		)
+			let normalizedPitchDetection = normalizedDetection(
+				rawDetection,
+				referenceFrequency: stableFrequency ?? lastPublishedFrequency
+			)
 		
-		if let noteOnsetTime, now - noteOnsetTime < onsetIgnoreDuration {
+		// The initial transient after a pluck is the noisiest part of the signal.
+		// We keep publishing the previous stable value during that short window.
+			if let noteOnsetTime, now - noteOnsetTime < onsetIgnoreDuration {
+				log(
+					rms: rms,
+					detection: normalizedPitchDetection,
+					published: currentPublishedFrequency(fallback: stableFrequency),
+					status: "attack_ignore",
+					decision: .reject
+				)
+				publish(frequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
+				return
+			}
+			
+			let observationAccepted = normalizedPitchDetection?.confidence ?? 0 >= minimumObservationConfidence
+			if let normalizedPitchDetection, normalizedPitchDetection.confidence >= minimumObservationConfidence {
+				let observation = PitchObservation(time: now, frequency: normalizedPitchDetection.frequency, confidence: normalizedPitchDetection.confidence)
+				recentObservations.append(observation)
+				lastValidObservationTime = now
+			}
+			
+			recentObservations.removeAll { now - $0.time > observationWindow }
+			
+			let trackedFrequency = updateTracker(now: now)
+			let publishedFrequency = currentPublishedFrequency(fallback: trackedFrequency)
+			let decision = logDecision(
+				detection: normalizedPitchDetection,
+				observationAccepted: observationAccepted,
+				publishedFrequency: publishedFrequency
+			)
+		
 			log(
 				rms: rms,
-				detection: detection,
-				published: currentPublishedFrequency(fallback: lockedFrequency),
-				status: "attack_ignore",
-				decision: .reject
-			)
-			publish(frequency: currentPublishedFrequency(fallback: lockedFrequency), amplitude: rms, state: trackerState)
-			return
-		}
-		
-		let observationAccepted = detection?.confidence ?? 0 >= minimumObservationConfidence
-		if let detection, detection.confidence >= minimumObservationConfidence {
-			let observation = PitchObservation(time: now, frequency: detection.frequency, confidence: detection.confidence)
-			observations.append(observation)
-			lastValidObservationTime = now
-		}
-		
-		observations.removeAll { now - $0.time > observationWindow }
-		
-		let trackedFrequency = updateTracker(now: now)
-		let publishedFrequency = currentPublishedFrequency(fallback: trackedFrequency)
-		let decision = logDecision(
-			detection: detection,
-			observationAccepted: observationAccepted,
-			publishedFrequency: publishedFrequency
-		)
-		
-		log(
-			rms: rms,
-			detection: detection,
-			published: publishedFrequency,
-			status: trackerState.rawValue,
-			decision: decision
+				detection: normalizedPitchDetection,
+				published: publishedFrequency,
+				status: trackerState.rawValue,
+				decision: decision
 		)
 		publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
 	}
 	
 	private func handleSilence(now: TimeInterval, rms: Double) {
-		observations.removeAll { now - $0.time > observationWindow }
+		recentObservations.removeAll { now - $0.time > observationWindow }
 		
 		let publishedFrequency: Double
 		if let lastValidObservationTime, now - lastValidObservationTime <= silenceHoldDuration {
 			let heldFrequency = currentPublishedFrequency(
-				fallback: lockedFrequency ?? strongestCluster(from: observations)?.representativeFrequency
+				fallback: stableFrequency ?? strongestCluster(from: recentObservations)?.representativeFrequency
 			)
 			publishedFrequency = heldFrequency
 			publish(frequency: heldFrequency, amplitude: rms, state: trackerState)
 		} else {
 			trackerState = .idle
-			lockedFrequency = nil
+			stableFrequency = nil
 			publishedFrequency = currentPublishedFrequency()
 			publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
 		}
@@ -262,102 +284,110 @@ final class ToneDetector: ObservableObject {
 		lastRMSAboveThreshold = isAboveThreshold
 	}
 	
+	// MARK: - Pitch Tracking
+	
 	private func updateTracker(now: TimeInterval) -> Double? {
-		let candidates = observations.filter { now - $0.time <= clusterWindow }
-		guard !candidates.isEmpty else {
+		let recentCandidates = recentObservations.filter { now - $0.time <= clusterWindow }
+		guard !recentCandidates.isEmpty else {
 			trackerState = .idle
-			lockedFrequency = nil
+			stableFrequency = nil
 			return nil
 		}
 		
-		let cluster: PitchCluster?
-		if let lockedFrequency {
-			cluster = bestCluster(near: lockedFrequency, from: candidates) ?? strongestCluster(from: candidates)
+		// When we already have a stable tone, first try to keep following nearby
+		// samples. Only if that fails do we look at the strongest cluster overall.
+		let selectedCluster: PitchCluster?
+		if let stableFrequency {
+			selectedCluster = bestCluster(near: stableFrequency, from: recentCandidates) ?? strongestCluster(from: recentCandidates)
 		} else {
-			cluster = strongestCluster(from: candidates)
+			selectedCluster = strongestCluster(from: recentCandidates)
 		}
 		
-		guard let cluster else {
+		guard let selectedCluster else {
 			trackerState = .idle
-			lockedFrequency = nil
+			stableFrequency = nil
 			return nil
 		}
 		
 		switch trackerState {
 		case .idle:
-			if cluster.count >= acquiringClusterCount {
+			if selectedCluster.count >= acquiringClusterCount {
 				trackerState = .acquiring
-				lockedFrequency = cluster.representativeFrequency
+				stableFrequency = selectedCluster.representativeFrequency
 				lastLockedMatchTime = now
-				return cluster.representativeFrequency
+				return selectedCluster.representativeFrequency
 			}
 			return nil
 			
 		case .acquiring:
-			if let latestResponsiveFrequency = latestResponsiveFrequency(near: cluster.representativeFrequency, within: candidates) {
-				lockedFrequency = latestResponsiveFrequency
+			// For small retuning moves we do not want to wait for a full re-lock.
+			// If the newest observations stay near the current cluster, publish them.
+			if let latestResponsiveFrequency = latestResponsiveFrequency(near: selectedCluster.representativeFrequency, within: recentCandidates) {
+				stableFrequency = latestResponsiveFrequency
 				lastLockedMatchTime = now
 				return latestResponsiveFrequency
 			}
 			
-			if shouldFastSwitch(to: cluster, now: now) {
+			if shouldFastSwitch(to: selectedCluster, now: now) {
 				trackerState = .locked
-				lockedFrequency = cluster.representativeFrequency
+				stableFrequency = selectedCluster.representativeFrequency
 				lastLockedMatchTime = now
-				return cluster.representativeFrequency
+				return selectedCluster.representativeFrequency
 			}
 			
-			if cluster.count >= lockedClusterCount && cluster.timeSpan >= lockedClusterTimeSpan {
+			if selectedCluster.count >= lockedClusterCount && selectedCluster.timeSpan >= lockedClusterTimeSpan {
 				trackerState = .locked
-				lockedFrequency = cluster.representativeFrequency
+				stableFrequency = selectedCluster.representativeFrequency
 				lastLockedMatchTime = now
-				return cluster.representativeFrequency
+				return selectedCluster.representativeFrequency
 			}
 			
-			if cluster.count >= acquiringClusterCount {
-				lockedFrequency = cluster.representativeFrequency
+			if selectedCluster.count >= acquiringClusterCount {
+				stableFrequency = selectedCluster.representativeFrequency
 				lastLockedMatchTime = now
-				return cluster.representativeFrequency
+				return selectedCluster.representativeFrequency
 			}
-			return lockedFrequency
+			return stableFrequency
 			
 		case .locked:
-			guard let lockedFrequency else {
+			guard let stableFrequency else {
 				trackerState = .idle
 				return nil
 			}
 			
-			let deviationRatio = abs(cluster.representativeFrequency - lockedFrequency) / max(lockedFrequency, 1)
+			let deviationRatio = abs(selectedCluster.representativeFrequency - stableFrequency) / max(stableFrequency, 1)
 			if deviationRatio <= relockDistanceRatio {
 				let responsiveFrequency = latestResponsiveFrequency(
-					near: cluster.representativeFrequency,
-					within: candidates
-				) ?? cluster.representativeFrequency
-				self.lockedFrequency = responsiveFrequency
+					near: selectedCluster.representativeFrequency,
+					within: recentCandidates
+				) ?? selectedCluster.representativeFrequency
+				self.stableFrequency = responsiveFrequency
 				lastLockedMatchTime = now
 				return responsiveFrequency
 			}
 			
-			if shouldFastSwitch(to: cluster, now: now) {
+			// A fresh pluck can legitimately move to a different stable tone fast.
+			// Allow that jump only when the new cluster is short, strong and coherent.
+			if shouldFastSwitch(to: selectedCluster, now: now) {
 				trackerState = .locked
-				self.lockedFrequency = cluster.representativeFrequency
+				self.stableFrequency = selectedCluster.representativeFrequency
 				lastLockedMatchTime = now
-				return cluster.representativeFrequency
+				return selectedCluster.representativeFrequency
 			}
 			
-			if cluster.count >= lockReplacementCount && cluster.timeSpan >= lockReplacementTimeSpan {
-				self.lockedFrequency = cluster.representativeFrequency
+			if selectedCluster.count >= lockReplacementCount && selectedCluster.timeSpan >= lockReplacementTimeSpan {
+				self.stableFrequency = selectedCluster.representativeFrequency
 				lastLockedMatchTime = now
-				return cluster.representativeFrequency
+				return selectedCluster.representativeFrequency
 			}
 			
-			if let lastLockedMatchTime, now - lastLockedMatchTime > 0.35, cluster.count >= acquiringClusterCount {
+			if let lastLockedMatchTime, now - lastLockedMatchTime > 0.35, selectedCluster.count >= acquiringClusterCount {
 				trackerState = .acquiring
-				self.lockedFrequency = cluster.representativeFrequency
-				return cluster.representativeFrequency
+				self.stableFrequency = selectedCluster.representativeFrequency
+				return selectedCluster.representativeFrequency
 			}
 			
-			return lockedFrequency
+			return stableFrequency
 		}
 	}
 	
@@ -416,6 +446,8 @@ final class ToneDetector: ObservableObject {
 		near referenceFrequency: Double,
 		within observations: [PitchObservation]
 	) -> Double? {
+		// Use the newest nearby sample instead of a slower cluster center when the
+		// player is making small manual tuning adjustments.
 		let tolerance = max(1.0, referenceFrequency * immediateRetuneRatio)
 		return observations
 			.reversed()
@@ -447,6 +479,8 @@ final class ToneDetector: ObservableObject {
 		return 0
 	}
 	
+	// MARK: - Signal Preparation
+	
 	private func calculateRMS(_ samples: [Float]) -> Double {
 		guard !samples.isEmpty else { return 0 }
 		let sum = samples.reduce(0.0) { partial, sample in
@@ -470,6 +504,9 @@ final class ToneDetector: ObservableObject {
 	}
 	
 	private func representativeFrequency(for observations: [PitchObservation]) -> Double {
+		// Cluster centers are intentionally robust rather than perfectly smooth.
+		// We prefer the newest value near the median so the UI stays responsive
+		// without letting one distant outlier drag the result away.
 		let sortedByTime = observations.sorted { $0.time < $1.time }
 		let sortedValues = sortedByTime.map(\.frequency).sorted()
 		let middleIndex = sortedValues.count / 2
@@ -493,6 +530,8 @@ final class ToneDetector: ObservableObject {
 		_ detection: (frequency: Double, confidence: Double)?,
 		referenceFrequency: Double?
 	) -> (frequency: Double, confidence: Double)? {
+		// If YIN briefly reports an octave above or below the current stable tone,
+		// snap it back to the nearest octave-equivalent candidate.
 		guard let detection else { return nil }
 		guard let referenceFrequency, referenceFrequency > 0 else { return detection }
 		guard trackerState != .idle else { return detection }
@@ -622,6 +661,8 @@ final class ToneDetector: ObservableObject {
 		return Double(index) + offset
 	}
 	
+	// MARK: - Debug Logging
+	
 	private func logDecision(
 		detection: (frequency: Double, confidence: Double)?,
 		observationAccepted: Bool,
@@ -665,7 +706,7 @@ final class ToneDetector: ObservableObject {
 				decision.rawValue,
 				rms,
 				confidenceText,
-				observations.count,
+				recentObservations.count,
 				status
 			)
 		)
