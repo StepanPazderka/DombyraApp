@@ -1,3 +1,10 @@
+//
+//  ToneDetector.swift
+//  DombyraApp
+//
+//  Created by Stepan Pazderka on 16.04.2026.
+//
+
 import SwiftUI
 
 struct TuningView: View {
@@ -34,7 +41,7 @@ struct TuningView: View {
 	}
 	
     @Binding var tuningMode: TuningMode
-    
+	@Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var detector: ToneDetector
     @State private var displayedFrequency: Double = 0
     @State private var displayedFrequencyTextValue: Double = 0
@@ -236,7 +243,7 @@ struct TuningView: View {
 					.scaledToFill()
 					.frame(width: geometry.size.width, height: geometry.size.height)
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
-					.opacity(0.5)
+					.opacity(colorScheme == .dark ? 0.8 : 0.5 )
 					.clipped()
 			}
 			.ignoresSafeArea()
