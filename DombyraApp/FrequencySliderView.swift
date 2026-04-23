@@ -41,20 +41,25 @@ struct FrequencySliderView: View {
 			static let frequencyRange: ClosedRange<Double> = 0...400
             static let particleLifetime: TimeInterval = 1.1
             static let particleRiseDistance: CGFloat = 46
-            static let particleSize: CGFloat = 5
+            static let particleSize: CGFloat = 6
+            static let minimumParticleSize: CGFloat = 1
+            static let loudParticleAmplitude: Double = 0.02
             static let maxParticleCount = 12
-		}
+			}
 
         private struct FrequencyParticle: Identifiable {
             let id = UUID()
             let frequency: Double
             let tuningProgress: Double
+            let color: Color
+            let size: CGFloat
             let createdAt: Date
         }
 	
-		@Binding var frequency: Double
+			@Binding var frequency: Double
         @Binding var particleFrequency: Double
-		@Binding var lockedFrequency: Double?
+        @Binding var particleAmplitude: Double
+			@Binding var lockedFrequency: Double?
 		@Binding var activeLockedString: TuningView.LockedString?
 	let stringID: TuningView.LockedString
     @State var displayedFrequency: Double
@@ -63,6 +68,7 @@ struct FrequencySliderView: View {
     var directionIndicator: DirectionIndicator? = nil
     var directionProgress: Double = 0
     var particleTuningProgress: Double = -1
+    var forceBlueParticles: Bool = false
     var idleIndicatorSymbol: String = "lock.open"
     var successIndicatorSymbol: String = "checkmark.circle.fill"
     @State private var flashOpacity: Double = 0
@@ -164,7 +170,7 @@ struct FrequencySliderView: View {
 		}
 
         private var shouldEmitFrequencyParticles: Bool {
-            !locked && particleTuningProgress >= 0
+            forceBlueParticles || (!locked && (activeLockedString == nil || particleTuningProgress >= 0))
         }
 
         private var currentParticleTuningProgress: Double {
@@ -177,6 +183,23 @@ struct FrequencySliderView: View {
                 saturation: 0.90,
                 brightness: 0.95
             )
+        }
+
+        private func particleSize(for amplitude: Double) -> CGFloat {
+            let normalizedAmplitude = min(max(amplitude / Layout.loudParticleAmplitude, 0), 1)
+            return Layout.minimumParticleSize + ((Layout.particleSize - Layout.minimumParticleSize) * normalizedAmplitude)
+        }
+
+        private var currentParticleColor: Color {
+            guard !forceBlueParticles else {
+                return .blue
+            }
+
+            guard activeLockedString != nil else {
+                return sliderAccentColor
+            }
+
+            return particleColor(for: currentParticleTuningProgress)
         }
 
         private func particleProgress(for particle: FrequencyParticle, at date: Date) -> Double {
@@ -198,6 +221,8 @@ struct FrequencySliderView: View {
                 FrequencyParticle(
                     frequency: frequency,
                     tuningProgress: currentParticleTuningProgress,
+                    color: currentParticleColor,
+                    size: particleSize(for: particleAmplitude),
                     createdAt: now
                 )
             )
@@ -218,10 +243,10 @@ struct FrequencySliderView: View {
                         ) + (Layout.iconWidth / 2)
 
                         Circle()
-                            .fill(particleColor(for: particle.tuningProgress).opacity(1 - progress))
-                            .frame(width: Layout.particleSize, height: Layout.particleSize)
+                            .fill(particle.color.opacity(1 - progress))
+                            .frame(width: particle.size, height: particle.size)
                             .offset(
-                                x: xPosition - (Layout.particleSize / 2),
+                                x: xPosition - (particle.size / 2),
                                 y: -(Layout.indicatorHeight + Layout.particleRiseDistance * progress)
                             )
                     }

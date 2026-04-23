@@ -18,15 +18,6 @@ struct TuningView: View {
 			}
 		}
 		
-		var title: String {
-			switch self {
-			case .fourth:
-				return "Fourth tuning"
-			case .fifth:
-				return "Fifth tuning"
-			}
-		}
-		
 		var shortTitle: String {
 			switch self {
 			case .fourth:
@@ -48,9 +39,11 @@ struct TuningView: View {
     @State private var displayedFrequency: Double = 0
     @State private var displayedFrequencyTextValue: Double = 0
     @State private var rawDetectedFrequency: Double = 0
+    @State private var rawDetectedAmplitude: Double = 0
     @State private var lockedTopFrequency: Double? = nil
     @State private var lockedBottomFrequency: Double? = nil
     @State private var activeLockedString: LockedString? = nil
+    @State private var referenceLockedAt: Date? = nil
     @State private var textAnimationTask: Task<Void, Never>?
     @State private var hasStartedTopStringSearch = false
     @State private var hasStartedBottomStringSearch = false
@@ -62,6 +55,8 @@ struct TuningView: View {
     private let highlightTolerance: Double = 0.6
     private let animatedTextThreshold: Double = 50.0
     private let searchActivationTolerance: Double = 16.0
+    private let sameReferenceDelay: TimeInterval = 1.0
+    private let sameReferenceTolerance: Double = 2.0
 	
     private var shouldHighlightTopString: Bool {
         guard lockedTopFrequency == nil,
@@ -191,6 +186,30 @@ struct TuningView: View {
         }
     }
 
+    private var isTuningLineColored: Bool {
+        if lockedTopFrequency == nil, lockedBottomFrequency != nil {
+            return shouldHighlightTopString || topStringDirectionIndicator != nil
+        }
+
+        if lockedBottomFrequency == nil, lockedTopFrequency != nil {
+            return shouldHighlightBottomString || bottomStringDirectionIndicator != nil
+        }
+
+        return false
+    }
+
+    private var isTuningSameAsReference: Bool {
+        TuningRules.shouldShowSameReferenceWarning(
+            referenceFrequency: referenceFrequency,
+            referenceLockedAt: referenceLockedAt,
+            isTuningLineColored: isTuningLineColored,
+            displayedFrequency: displayedFrequency,
+            amplitude: rawDetectedAmplitude,
+            delay: sameReferenceDelay,
+            tolerance: sameReferenceTolerance
+        )
+    }
+
     private func updateStringSearchState(for liveFrequency: Double, amplitude: Double) {
         guard amplitude > 0.003 else { return }
 
@@ -240,6 +259,7 @@ struct TuningView: View {
                     FrequencySliderView(
                         frequency: $displayedFrequency,
                         particleFrequency: $rawDetectedFrequency,
+                        particleAmplitude: $rawDetectedAmplitude,
                         lockedFrequency: $lockedTopFrequency,
                         activeLockedString: $activeLockedString,
                         stringID: .top,
@@ -248,12 +268,14 @@ struct TuningView: View {
                         directionIndicator: topStringDirectionIndicator,
                         directionProgress: topStringDirectionProgress,
                         particleTuningProgress: topStringParticleTuningProgress,
+                        forceBlueParticles: isTuningSameAsReference,
                         idleIndicatorSymbol: topStringIdleIndicatorSymbol
                     )
 				
                     FrequencySliderView(
                         frequency: $displayedFrequency,
                         particleFrequency: $rawDetectedFrequency,
+                        particleAmplitude: $rawDetectedAmplitude,
                         lockedFrequency: $lockedBottomFrequency,
                         activeLockedString: $activeLockedString,
                         stringID: .bottom,
@@ -262,14 +284,26 @@ struct TuningView: View {
                         directionIndicator: bottomStringDirectionIndicator,
                         directionProgress: bottomStringDirectionProgress,
                         particleTuningProgress: bottomStringParticleTuningProgress,
+                        forceBlueParticles: isTuningSameAsReference,
                         idleIndicatorSymbol: bottomStringIdleIndicatorSymbol
                     )
-				
-					Color.clear
-					.frame(height: 1)
+
+							Color.clear
+							.frame(height: 1)
+				}
+				.padding()
+
+                Text("Ойпырмай!")
+                    .font(.system(size: 72, weight: .black, design: .rounded))
+                    .minimumScaleFactor(0.45)
+                    .lineLimit(1)
+                    .foregroundStyle(.blue)
+                    .shadow(color: .white.opacity(0.75), radius: 10)
+                    .padding(.horizontal, 18)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .opacity(isTuningSameAsReference ? 1 : 0)
+                    .allowsHitTesting(false)
 			}
-			.padding()
-		}
 		.safeAreaInset(edge: .bottom, spacing: 0) {
 			Picker("Tuning mode", selection: $tuningMode) {
 				ForEach(TuningMode.allCases) { mode in
@@ -292,9 +326,16 @@ struct TuningView: View {
             rawDetectedFrequency = newFrequency
         }
         .onReceive(detector.$amplitude) { amplitude in
+            rawDetectedAmplitude = amplitude
             updateStringSearchState(for: detector.frequency, amplitude: amplitude)
         }
         .onChange(of: activeLockedString) {
+            if activeLockedString == nil {
+                referenceLockedAt = nil
+            } else {
+                referenceLockedAt = Date()
+            }
+
             if activeLockedString != .top {
                 lockedTopFrequency = nil
             }

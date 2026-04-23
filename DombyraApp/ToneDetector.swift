@@ -84,14 +84,14 @@ import Combine
 	
 	// MARK: - Tuning Parameters
 	
-	private let tapBufferSize: AVAudioFrameCount = 512
-	private let analysisFrameCount = 4096
-	private let maxBufferedSamples = 8192
-	
-	private let observationWindow: TimeInterval = 1.2
-	private let clusterWindow: TimeInterval = 0.85
-		private let silenceHoldDuration: TimeInterval = 0.7
-		private let onsetIgnoreDuration: TimeInterval = 0.05
+			private let tapBufferSize: AVAudioFrameCount = 512
+			private let analysisFrameCount = 4096
+			private let maxBufferedSamples = 8192
+		
+		private let observationWindow: TimeInterval = 1.2
+		private let clusterWindow: TimeInterval = 0.85
+			private let silenceHoldDuration: TimeInterval = 0.7
+			private let onsetIgnoreDuration: TimeInterval = 0.05
 	
 	private let yinThreshold: Double = 0.12
 	private let minimumRMS: Double = 0.0025
@@ -101,15 +101,15 @@ import Combine
 	private let minimumObservationConfidence: Double = 0.16
 	private let immediateRetuneRatio: Double = 0.02
 	private let acquiringClusterCount = 2
-	private let lockedClusterCount = 3
-	private let lockedClusterTimeSpan: TimeInterval = 0.18
+		private let lockedClusterCount = 3
+		private let lockedClusterTimeSpan: TimeInterval = 0.18
 	private let relockDistanceRatio: Double = 0.075
-	private let lockReplacementCount = 5
-	private let lockReplacementTimeSpan: TimeInterval = 0.32
+		private let lockReplacementCount = 5
+		private let lockReplacementTimeSpan: TimeInterval = 0.32
 	private let fastSwitchClusterCount = 2
-	private let fastSwitchTimeSpan: TimeInterval = 0.04
-	private let fastSwitchConfidence: Double = 0.68
-	private let fastSwitchAttackWindow: TimeInterval = 0.45
+		private let fastSwitchTimeSpan: TimeInterval = 0.04
+		private let fastSwitchConfidence: Double = 0.68
+		private let fastSwitchAttackWindow: TimeInterval = 0.45
 	private let logDetections = true
 	
 	// MARK: - Audio Engine
@@ -198,16 +198,16 @@ import Combine
 			sampleBuffer.removeFirst(sampleBuffer.count - maxBufferedSamples)
 		}
 		
-			guard sampleBuffer.count >= analysisFrameCount else {
+				guard sampleBuffer.count >= analysisFrameCount else {
                 publishRawFrequency(0)
-				publish(frequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
-				return
-			}
-		
-		let sampleRate = buffer.format.sampleRate
-		let analysisSamples = Array(sampleBuffer.suffix(analysisFrameCount))
-		let preparedSamples = prepareSamplesForPitchDetection(analysisSamples)
-		let rawDetection = detectFrequencyYIN(
+					publish(frequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
+					return
+				}
+			
+			let sampleRate = buffer.format.sampleRate
+			let analysisSamples = Array(sampleBuffer.suffix(analysisFrameCount))
+			let preparedSamples = prepareSamplesForPitchDetection(analysisSamples)
+			let rawDetection = detectFrequencyYIN(
 			samples: preparedSamples,
 			sampleRate: sampleRate,
 			minFrequency: minDetectableFrequency,
@@ -218,7 +218,7 @@ import Combine
 				referenceFrequency: stableFrequency ?? lastPublishedFrequency
 			)
             publishRawFrequency(normalizedPitchDetection?.frequency ?? 0)
-		
+			
 		// The initial transient after a pluck is the noisiest part of the signal.
 		// We keep publishing the previous stable value during that short window.
 			if let noteOnsetTime, now - noteOnsetTime < onsetIgnoreDuration {
@@ -266,9 +266,9 @@ import Combine
 				decision: decision
 		)
 		publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
-	}
-	
-	private func handleSilence(now: TimeInterval, rms: Double) {
+		}
+
+		private func handleSilence(now: TimeInterval, rms: Double) {
 			recentObservations.removeAll { now - $0.time > observationWindow }
 			
 			let publishedFrequency: Double
