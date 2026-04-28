@@ -69,6 +69,8 @@ struct FrequencySliderView: View {
 	var directionProgress: Double = 0
 	var particleTuningProgress: Double = -1
 	var forceBlueParticles: Bool = false
+	var isAwaitingInput: Bool = false
+	var targetFrequency: Double? = nil
 	var idleIndicatorSymbol: String = "lock.open"
 	var successIndicatorSymbol: String = "checkmark.circle.fill"
 	@State private var flashOpacity: Double = 0
@@ -81,6 +83,8 @@ struct FrequencySliderView: View {
 	private var accentColor: Color? {
 		switch true {
 		case locked:
+			return .blue
+		case isAwaitingInput:
 			return .blue
 		case isHighlighted:
 			return .green
@@ -167,6 +171,26 @@ struct FrequencySliderView: View {
 			.fill(sliderAccentColor.opacity(flashOpacity))
 			.frame(width: Layout.flashSize, height: Layout.flashSize)
 			.blur(radius: Layout.flashBlurRadius)
+	}
+
+	@ViewBuilder
+	private func targetIndicator(width: CGFloat) -> some View {
+		if let targetFrequency, !locked {
+			let targetPosition = normalizedValue(for: width, frequency: targetFrequency)
+			let xOffset = indicatorXPosition(
+				for: targetPosition.xPosition,
+				width: width
+			) + (Layout.iconWidth / 2) - 1
+
+			VStack(spacing: 4) {
+				ForEach(0..<6, id: \.self) { _ in
+					Circle()
+						.fill(Color.blue.opacity(0.9))
+						.frame(width: 3, height: 3)
+				}
+			}
+			.offset(x: xOffset, y: 2)
+		}
 	}
 	
 	private var shouldEmitFrequencyParticles: Bool {
@@ -259,11 +283,13 @@ struct FrequencySliderView: View {
 		GeometryReader { geometry in
 			let sliderPosition = normalizedValue(for: geometry.size.width)
 			
-			ZStack(alignment: .leading) {
-				Capsule()
-					.frame(height: Layout.trackHeight)
-				
-				frequencyParticleLayer(width: geometry.size.width)
+				ZStack(alignment: .leading) {
+					Capsule()
+						.frame(height: Layout.trackHeight)
+					
+					targetIndicator(width: geometry.size.width)
+
+					frequencyParticleLayer(width: geometry.size.width)
 				
 				VStack(spacing: Layout.spacing) {
 					indicatorIcon
