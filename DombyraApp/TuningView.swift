@@ -244,17 +244,19 @@ struct TuningView: View {
 	}
 	
 	var body: some View {
-		ZStack {
-			GeometryReader { geometry in
-				Image("Dombyra")
-					.resizable()
-					.scaledToFill()
-					.frame(width: geometry.size.width, height: geometry.size.height)
-					.frame(maxWidth: .infinity, maxHeight: .infinity)
-					.opacity(colorScheme == .dark ? 0.8 : 0.5 )
-					.clipped()
-			}
-			.ignoresSafeArea()
+        ZStack {
+            GeometryReader { geometry in
+                let isLandscape = geometry.size.width > geometry.size.height
+
+                Image("Dombyra")
+                    .resizable()
+                    .aspectRatio(contentMode: isLandscape ? .fit : .fill)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .opacity(colorScheme == .dark ? 0.8 : 0.5)
+                    .clipped(antialiased: true)
+            }
+            .ignoresSafeArea()
 			
 			VStack(spacing: 16) {
 				VStack(spacing: 4) {
@@ -322,18 +324,17 @@ struct TuningView: View {
 			.padding()
 			
 		}
-		.safeAreaInset(edge: .bottom, spacing: 0) {
-			Picker("Tuning mode", selection: $tuningMode) {
-				ForEach(TuningMode.allCases) { mode in
-					Text(mode.shortTitle)
-						.font(.system(size: 34, weight: .semibold, design: .rounded))
-						.monospacedDigit()
-						.tag(mode)
+				.safeAreaInset(edge: .bottom, spacing: 0) {
+					Group {
+						if #available(iOS 26.0, *) {
+							tuningModePicker
+								.glassEffect()
+						} else {
+							tuningModePicker
+						}
+					}
+					.padding(.horizontal)
 				}
-			}
-			.pickerStyle(.segmented)
-			.padding(.horizontal)
-		}
 		.onReceive(detector.$frequency) { newFrequency in
 			guard newFrequency > 0 else { return }
 			
@@ -374,6 +375,18 @@ struct TuningView: View {
 		.onDisappear {
 			textAnimationTask?.cancel()
 		}
+	}
+
+	private var tuningModePicker: some View {
+		Picker("Tuning mode", selection: $tuningMode) {
+			ForEach(TuningMode.allCases) { mode in
+				Text(mode.shortTitle)
+					.font(.system(size: 80, weight: .semibold, design: .rounded))
+					.monospacedDigit()
+					.tag(mode)
+			}
+		}
+		.pickerStyle(.segmented)
 	}
 	
 	private func animateFrequencyText(to targetFrequency: Double) {
