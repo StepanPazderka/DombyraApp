@@ -20,8 +20,10 @@ import Combine
 /// Small changes should move immediately, while octave jumps and one-off outliers
 /// must be confirmed before they are allowed to reach the UI.
 final class ToneDetector: ObservableObject {
-	@Published var frequency: Double = 0
-	@Published var rawFrequency: Double = 0
+	// The UI can use the immediate value for responsive visual effects, while
+	// the stabilized value is the one trusted enough for the tuner readout.
+	@Published var immediateFrequency: Double = 0
+	@Published var stabilizedFrequency: Double = 0
 	@Published var amplitude: Double = 0
 	
 	private let appStartTime = Date().timeIntervalSinceReferenceDate
@@ -71,9 +73,13 @@ final class ToneDetector: ObservableObject {
 	
 	// MARK: - Runtime State
 	
+	// `sampleBuffer` keeps enough recent microphone samples for each YIN pass.
+	// `recentObservations` keeps accepted pitch candidates for the tracker.
 	private var sampleBuffer: [Float] = []
 	private var recentObservations: [PitchObservation] = []
 	private var trackerState: TrackerState = .idle
+	// Internal pitch lock. It may be held through brief dropouts so the UI does
+	// not flicker to zero.
 	private var stableFrequency: Double?
 	private var lastPublishedFrequency: Double?
 	private var lastValidObservationTime: TimeInterval?
@@ -84,15 +90,21 @@ final class ToneDetector: ObservableObject {
 	
 	// MARK: - Tuning Parameters
 	
+	// The tap size controls microphone callback latency; the larger analysis
+	// frame gives the pitch detector enough cycles to resolve low frequencies.
 	private let tapBufferSize: AVAudioFrameCount = 512
 	private let analysisFrameCount = 4096
 	private let maxBufferedSamples = 8192
 	
+	// Time windows tune the balance between responsiveness and stability.
+	// Shorter windows react faster; longer windows reject more outliers.
 	private let observationWindow: TimeInterval = 1.2
 	private let clusterWindow: TimeInterval = 0.85
 	private let silenceHoldDuration: TimeInterval = 0.7
 	private let onsetIgnoreDuration: TimeInterval = 0.05
 	
+	// YIN and tracker thresholds are intentionally permissive at the detector
+	// level, then tightened by confidence checks and clustering below.
 	private let yinThreshold: Double = 0.12
 	private let minimumRMS: Double = 0.0025
 	private let minDetectableFrequency: Double = 60
@@ -134,6 +146,8 @@ final class ToneDetector: ObservableObject {
 		try session.setPreferredIOBufferDuration(Double(tapBufferSize) / 44_100.0)
 		try session.setActive(true)
 		
+		// The input tap is the only audio source for the detector. Each callback
+		// hands off the latest PCM buffer to the pitch-processing pipeline.
 		let input = engine.inputNode
 		let format = input.inputFormat(forBus: 0)
 		
@@ -166,8 +180,8 @@ final class ToneDetector: ObservableObject {
 		lastRMSAboveThreshold = false
 		
 		Task { @MainActor in
-			self.frequency = 0
-			self.rawFrequency = 0
+			self.immediateFrequency = 0
+			self.stabilizedFrequency = 0
 			self.amplitude = 0
 			self.debugState = TrackerState.idle.rawValue
 		}
@@ -187,8 +201,11 @@ final class ToneDetector: ObservableObject {
 		
 		updateNoteOnsetTracking(rms: rms, now: now)
 		
+		// Below the RMS floor, pitch estimates are mostly noise. Publish no
+		// immediate pitch, but let `handleSilence` decide whether to hold the
+		// last stabilized value briefly.
 		if rms <= minimumRMS {
-			publishRawFrequency(0)
+			publishImmediateFrequency(0)
 			handleSilence(now: now, rms: rms)
 			return
 		}
@@ -198,9 +215,11 @@ final class ToneDetector: ObservableObject {
 			sampleBuffer.removeFirst(sampleBuffer.count - maxBufferedSamples)
 		}
 		
+		// Wait until the rolling buffer contains a full analysis frame. The UI can
+		// keep showing the previous stabilized value while the buffer warms up.
 		guard sampleBuffer.count >= analysisFrameCount else {
-			publishRawFrequency(0)
-			publish(frequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
+			publishImmediateFrequency(0)
+			publish(stabilizedFrequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
 			return
 		}
 		
@@ -217,7 +236,7 @@ final class ToneDetector: ObservableObject {
 			rawDetection,
 			referenceFrequency: stableFrequency ?? lastPublishedFrequency
 		)
-		publishRawFrequency(normalizedPitchDetection?.frequency ?? 0)
+		publishImmediateFrequency(normalizedPitchDetection?.frequency ?? 0)
 		
 		// The initial transient after a pluck is the noisiest part of the signal.
 		// We keep publishing the previous stable value during that short window.
@@ -229,10 +248,12 @@ final class ToneDetector: ObservableObject {
 				status: "attack_ignore",
 				decision: .reject
 			)
-			publish(frequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
+			publish(stabilizedFrequency: currentPublishedFrequency(fallback: stableFrequency), amplitude: rms, state: trackerState)
 			return
 		}
 		
+		// Only confident detections become observations. The tracker works from
+		// this filtered history instead of trusting a single detector frame.
 		let observationAccepted = normalizedPitchDetection?.confidence ?? 0 >= minimumObservationConfidence
 		if let normalizedPitchDetection, normalizedPitchDetection.confidence >= minimumObservationConfidence {
 			let observation = PitchObservation(time: now, frequency: normalizedPitchDetection.frequency, confidence: normalizedPitchDetection.confidence)
@@ -242,6 +263,8 @@ final class ToneDetector: ObservableObject {
 		
 		recentObservations.removeAll { now - $0.time > observationWindow }
 		
+		// Tracking converts the recent accepted observations into the value the
+		// tuner should trust. It may return nil while collecting enough evidence.
 		let trackedFrequency = updateTracker(now: now)
 		if let trackedFrequency, observationAccepted {
 			updatePluckSummary(
@@ -265,25 +288,28 @@ final class ToneDetector: ObservableObject {
 			status: trackerState.rawValue,
 			decision: decision
 		)
-		publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
+		publish(stabilizedFrequency: publishedFrequency, amplitude: rms, state: trackerState)
 	}
 	
 	private func handleSilence(now: TimeInterval, rms: Double) {
 		recentObservations.removeAll { now - $0.time > observationWindow }
 		
 		let publishedFrequency: Double
+		// A plucked string can dip below the RMS floor between useful frames. Hold
+		// the last good pitch briefly so the UI feels continuous instead of
+		// blinking off after every decay.
 		if let lastValidObservationTime, now - lastValidObservationTime <= silenceHoldDuration {
 			let heldFrequency = currentPublishedFrequency(
 				fallback: currentPluckSummary?.frequency ?? stableFrequency ?? strongestCluster(from: recentObservations)?.representativeFrequency
 			)
 			publishedFrequency = heldFrequency
-			publish(frequency: heldFrequency, amplitude: rms, state: trackerState)
+			publish(stabilizedFrequency: heldFrequency, amplitude: rms, state: trackerState)
 		} else {
 			trackerState = .idle
 			stableFrequency = nil
 			currentPluckSummary = nil
 			publishedFrequency = currentPublishedFrequency()
-			publish(frequency: publishedFrequency, amplitude: rms, state: trackerState)
+			publish(stabilizedFrequency: publishedFrequency, amplitude: rms, state: trackerState)
 		}
 		
 		log(
@@ -298,6 +324,8 @@ final class ToneDetector: ObservableObject {
 	private func updateNoteOnsetTracking(rms: Double, now: TimeInterval) {
 		let isAboveThreshold = rms > minimumRMS
 		if isAboveThreshold && !lastRMSAboveThreshold {
+			// Mark the start of a new pluck so the initial noisy transient can be
+			// ignored and fast-switch logic can identify intentional new notes.
 			noteOnsetTime = now
 			currentPluckSummary = nil
 		} else if !isAboveThreshold {
@@ -352,6 +380,10 @@ final class ToneDetector: ObservableObject {
 			return nil
 		}
 		
+		// The tracker has three phases:
+		// - idle: no trusted pitch yet
+		// - acquiring: a likely pitch exists, but needs confirmation
+		// - locked: a stable pitch is being followed and protected from jumps
 		switch trackerState {
 		case .idle:
 			if selectedCluster.count >= acquiringClusterCount {
@@ -418,6 +450,8 @@ final class ToneDetector: ObservableObject {
 				return selectedCluster.representativeFrequency
 			}
 			
+			// Require stronger evidence before replacing a locked pitch with a
+			// different cluster. This rejects isolated octave errors and harmonics.
 			if selectedCluster.count >= lockReplacementCount && selectedCluster.timeSpan >= lockReplacementTimeSpan {
 				self.stableFrequency = selectedCluster.representativeFrequency
 				lastLockedMatchTime = now
@@ -437,6 +471,8 @@ final class ToneDetector: ObservableObject {
 	private func strongestCluster(from observations: [PitchObservation]) -> PitchCluster? {
 		var clusters: [PitchCluster] = []
 		
+		// Group nearby pitch observations into clusters. The strongest cluster is
+		// the one with the most repeated evidence, using confidence as a tiebreak.
 		for observation in observations {
 			let tolerance = max(1.5, observation.frequency * clusterToleranceRatio)
 			
@@ -498,21 +534,22 @@ final class ToneDetector: ObservableObject {
 			.frequency
 	}
 	
-	private func publish(frequency: Double, amplitude: Double, state: TrackerState) {
-		if frequency > 0 {
-			lastPublishedFrequency = frequency
+	private func publish(stabilizedFrequency: Double, amplitude: Double, state: TrackerState) {
+		if stabilizedFrequency > 0 {
+			lastPublishedFrequency = stabilizedFrequency
 		}
 		
+		// Audio callbacks are not on the main actor, but SwiftUI-published state is.
 		Task { @MainActor in
-			self.frequency = frequency
+			self.stabilizedFrequency = stabilizedFrequency
 			self.amplitude = amplitude
 			self.debugState = state.rawValue
 		}
 	}
 	
-	private func publishRawFrequency(_ frequency: Double) {
+	private func publishImmediateFrequency(_ frequency: Double) {
 		Task { @MainActor in
-			self.rawFrequency = frequency
+			self.immediateFrequency = frequency
 		}
 	}
 	
@@ -541,6 +578,8 @@ final class ToneDetector: ObservableObject {
 	private func prepareSamplesForPitchDetection(_ samples: [Float]) -> [Double] {
 		guard !samples.isEmpty else { return [] }
 		
+		// Remove DC offset and apply a Hann window. This reduces edge artifacts
+		// before YIN compares shifted copies of the signal.
 		let mean = samples.reduce(0.0) { $0 + Double($1) } / Double(samples.count)
 		let count = samples.count
 		guard count > 1 else { return samples.map { Double($0) - mean } }
@@ -626,6 +665,8 @@ final class ToneDetector: ObservableObject {
 		var difference = Array(repeating: 0.0, count: maxLag + 1)
 		var cmndf = Array(repeating: 1.0, count: maxLag + 1)
 		
+		// YIN compares the signal with delayed versions of itself. A low
+		// difference at a lag means the waveform repeats near that period.
 		for lag in 1...maxLag {
 			var sum = 0.0
 			let limit = samples.count - lag
@@ -640,6 +681,8 @@ final class ToneDetector: ObservableObject {
 		}
 		
 		var runningSum = 0.0
+		// The cumulative mean normalized difference function makes the first
+		// strong period easier to identify than using raw differences alone.
 		for lag in 1...maxLag {
 			runningSum += difference[lag]
 			cmndf[lag] = runningSum == 0 ? 1.0 : difference[lag] * Double(lag) / runningSum
@@ -648,6 +691,8 @@ final class ToneDetector: ObservableObject {
 		var candidateLag: Int?
 		var candidateValue = 1.0
 		
+		// Prefer the first lag below the YIN threshold. That usually represents
+		// the fundamental period rather than a later repeated harmonic.
 		for lag in minLag...maxLag {
 			if cmndf[lag] < yinThreshold {
 				var refinedLag = lag
@@ -661,6 +706,8 @@ final class ToneDetector: ObservableObject {
 		}
 		
 		if candidateLag == nil {
+			// If no lag clears the threshold, accept only a very strong best match.
+			// Weak best matches are treated as no pitch.
 			var bestLag = minLag
 			var bestValue = cmndf[minLag]
 			for lag in (minLag + 1)...maxLag where cmndf[lag] < bestValue {
@@ -690,6 +737,8 @@ final class ToneDetector: ObservableObject {
 		let octaveLag = lag * 2
 		guard octaveLag <= maxLag else { return lag }
 		
+		// If the lag one octave lower is nearly as convincing, prefer it. This
+		// helps when the detector initially locks onto a strong harmonic.
 		let octaveValue = values[octaveLag]
 		let acceptableOctaveValue = min(0.22, candidateValue * 1.45)
 		guard octaveValue <= acceptableOctaveValue else { return lag }
@@ -700,6 +749,8 @@ final class ToneDetector: ObservableObject {
 	private func parabolicLagEstimate(values: [Double], index: Int) -> Double {
 		guard index > 0, index < values.count - 1 else { return Double(index) }
 		
+		// Interpolate around the best lag to get sub-sample precision, which makes
+		// the reported frequency less stair-stepped.
 		let left = values[index - 1]
 		let center = values[index]
 		let right = values[index + 1]

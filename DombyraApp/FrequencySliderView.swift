@@ -39,6 +39,7 @@ struct FrequencySliderView: View {
 		static let flashPeakOpacity: Double = 0.9
 		static let indicatorHorizontalInset: CGFloat = 9
 		static let frequencyRange: ClosedRange<Double> = 0...400
+		static let anchoredFrequencyWindow: Double = 80
 		static let particleLifetime: TimeInterval = 1.1
 		static let particleRiseDistance: CGFloat = 46
 		static let particleSize: CGFloat = 6
@@ -71,6 +72,7 @@ struct FrequencySliderView: View {
 	var forceBlueParticles: Bool = false
 	var isAwaitingInput: Bool = false
 	var targetFrequency: Double? = nil
+	var targetAnchorPosition: CGFloat? = nil
 	var idleIndicatorSymbol: String = "lock.open"
 	var successIndicatorSymbol: String = "checkmark.circle.fill"
 	@State private var flashOpacity: Double = 0
@@ -121,7 +123,13 @@ struct FrequencySliderView: View {
 	
 	private func normalizedValue(for width: CGFloat, frequency: Double? = nil) -> (value: Double, xPosition: CGFloat) {
 		let sourceFrequency = frequency ?? displayedFrequency
-		let normalized = min(max(sourceFrequency / Layout.frequencyRange.upperBound, 0), 1)
+		let normalized: Double
+		if let targetAnchorPosition, let referenceFrequency = targetFrequency ?? lockedFrequency {
+			let anchor = Double(min(max(targetAnchorPosition, 0), 1))
+			normalized = min(max(anchor + ((sourceFrequency - referenceFrequency) / Layout.anchoredFrequencyWindow), 0), 1)
+		} else {
+			normalized = min(max(sourceFrequency / Layout.frequencyRange.upperBound, 0), 1)
+		}
 		return (normalized, normalized * width)
 	}
 	

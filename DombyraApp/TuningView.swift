@@ -45,7 +45,7 @@ struct TuningView: View {
 	@EnvironmentObject private var detector: ToneDetector
 	@State private var displayedFrequency: Double = 0
 	@State private var displayedFrequencyTextValue: Double = 0
-	@State private var rawDetectedFrequency: Double = 0
+	@State private var immediateFrequency: Double = 0
 	@State private var rawDetectedAmplitude: Double = 0
 	@State private var lockedTopFrequency: Double? = nil
 	@State private var lockedBottomFrequency: Double? = nil
@@ -63,6 +63,10 @@ struct TuningView: View {
 	private let animatedTextThreshold: Double = 50.0
 	private let searchActivationTolerance: Double = 16.0
 	private let sameReferenceTolerance: Double = 2.0
+	private let contentHorizontalPadding: CGFloat = 16
+	private let dombyraSVGSize = CGSize(width: 1080, height: 1080)
+	private let topStringSVGX: CGFloat = 527
+	private let bottomStringSVGX: CGFloat = 551
 	
 	private var shouldHighlightTopString: Bool {
 		guard lockedTopFrequency == nil,
@@ -91,6 +95,98 @@ struct TuningView: View {
 		} else {
 			return frequency / upwardRatio
 		}
+	}
+	
+	private func stringAnchorPosition(svgX: CGFloat, in size: CGSize) -> CGFloat {
+		let stringScreenX = screenPoint(for: CGPoint(x: svgX, y: 0), in: size).x
+		let sliderWidth = max(size.width - (contentHorizontalPadding * 2), 1)
+		let sliderLocalX = stringScreenX - contentHorizontalPadding
+		
+		return min(max(sliderLocalX / sliderWidth, 0), 1)
+	}
+	
+	private func imageScale(for size: CGSize) -> CGFloat {
+		let isLandscape = size.width > size.height
+		if isLandscape {
+			return min(size.width / dombyraSVGSize.width, size.height / dombyraSVGSize.height)
+		}
+		
+		return max(size.width / dombyraSVGSize.width, size.height / dombyraSVGSize.height)
+	}
+	
+	private func screenPoint(for svgPoint: CGPoint, in size: CGSize) -> CGPoint {
+		let scale = imageScale(for: size)
+		let displayedImageSize = CGSize(
+			width: dombyraSVGSize.width * scale,
+			height: dombyraSVGSize.height * scale
+		)
+		let imageOrigin = CGPoint(
+			x: (size.width - displayedImageSize.width) / 2,
+			y: (size.height - displayedImageSize.height) / 2
+		)
+		
+		return CGPoint(
+			x: imageOrigin.x + (svgPoint.x * scale),
+			y: imageOrigin.y + (svgPoint.y * scale)
+		)
+	}
+	
+	private var topStringOverlayColor: Color? {
+		if activeLockedString == .top {
+			return .blue
+		}
+		
+		return shouldHighlightTopString ? .green : nil
+	}
+	
+	private var bottomStringOverlayColor: Color? {
+		if activeLockedString == .bottom {
+			return .blue
+		}
+		
+		return shouldHighlightBottomString ? .green : nil
+	}
+	
+	@ViewBuilder
+	private func coloredStringOverlay(size: CGSize, isLandscape: Bool) -> some View {
+		ZStack {
+			if let topStringOverlayColor {
+				coloredStringImage(
+					name: "left_string",
+					color: topStringOverlayColor,
+					isLandscape: isLandscape,
+					size: size
+				)
+			}
+			
+			if let bottomStringOverlayColor {
+				coloredStringImage(
+					name: "right_string",
+					color: bottomStringOverlayColor,
+					isLandscape: isLandscape,
+					size: size
+				)
+			}
+		}
+		.allowsHitTesting(false)
+	}
+	
+	private func coloredStringImage(
+		name: String,
+		color: Color,
+		isLandscape: Bool,
+		size: CGSize
+	) -> some View {
+		Image(name)
+			.renderingMode(.template)
+			.resizable()
+			.aspectRatio(contentMode: isLandscape ? .fit : .fill)
+			.frame(width: size.width, height: size.height)
+			.frame(maxWidth: .infinity, maxHeight: .infinity)
+			.foregroundStyle(color)
+			.opacity(0.95)
+			.clipped(antialiased: true)
+			.ignoresSafeArea()
 	}
 	
 	private var topStringDirectionIndicator: FrequencySliderView.DirectionIndicator? {
@@ -143,20 +239,20 @@ struct TuningView: View {
 		guard lockedTopFrequency == nil,
 			  let lockedBottomFrequency,
 			  hasStartedTopStringSearch,
-			  rawDetectedFrequency > 0 else { return -1 }
+			  immediateFrequency > 0 else { return -1 }
 		
 		let expectedTopFrequency = pairedFrequency(for: lockedBottomFrequency, isTopString: false)
-		return directionProgress(for: rawDetectedFrequency - expectedTopFrequency)
+		return directionProgress(for: immediateFrequency - expectedTopFrequency)
 	}
 	
 	private var bottomStringParticleTuningProgress: Double {
 		guard lockedBottomFrequency == nil,
 			  let lockedTopFrequency,
 			  hasStartedBottomStringSearch,
-			  rawDetectedFrequency > 0 else { return -1 }
+			  immediateFrequency > 0 else { return -1 }
 		
 		let expectedBottomFrequency = pairedFrequency(for: lockedTopFrequency, isTopString: true)
-		return directionProgress(for: rawDetectedFrequency - expectedBottomFrequency)
+		return directionProgress(for: immediateFrequency - expectedBottomFrequency)
 	}
 	
 	private func directionProgress(for difference: Double) -> Double {
@@ -244,22 +340,25 @@ struct TuningView: View {
 	}
 	
 	var body: some View {
-        ZStack {
-            GeometryReader { geometry in
-                let isLandscape = geometry.size.width > geometry.size.height
-
-                Image("Dombyra")
-                    .resizable()
-                    .aspectRatio(contentMode: isLandscape ? .fit : .fill)
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .opacity(colorScheme == .dark ? 0.8 : 0.5)
-                    .clipped(antialiased: true)
-            }
-            .ignoresSafeArea()
+		GeometryReader { geometry in
+			let isLandscape = geometry.size.width > geometry.size.height
+			let topStringAnchorPosition = stringAnchorPosition(svgX: topStringSVGX, in: geometry.size)
+			let bottomStringAnchorPosition = stringAnchorPosition(svgX: bottomStringSVGX, in: geometry.size)
 			
-			VStack(spacing: 16) {
-				VStack(spacing: 4) {
+			ZStack {
+				Image("Dombyra")
+					.resizable()
+					.aspectRatio(contentMode: isLandscape ? .fit : .fill)
+					.frame(width: geometry.size.width, height: geometry.size.height)
+					.frame(maxWidth: .infinity, maxHeight: .infinity)
+					.opacity(colorScheme == .dark ? 0.8 : 0.5)
+					.clipped(antialiased: true)
+					.ignoresSafeArea()
+				
+				coloredStringOverlay(size: geometry.size, isLandscape: isLandscape)
+				
+				VStack(spacing: 16) {
+					VStack(spacing: 4) {
 					Text(displayedFrequency > 0
 						 ? "\(displayedFrequencyTextValue, specifier: "%.2f") Hz"
 						 : "00.00 Hz")
@@ -275,7 +374,7 @@ struct TuningView: View {
 				
 				FrequencySliderView(
 					frequency: $displayedFrequency,
-					particleFrequency: $rawDetectedFrequency,
+					particleFrequency: $immediateFrequency,
 					particleAmplitude: $rawDetectedAmplitude,
 					lockedFrequency: $lockedTopFrequency,
 					activeLockedString: $activeLockedString,
@@ -285,15 +384,16 @@ struct TuningView: View {
 					directionIndicator: topStringDirectionIndicator,
 					directionProgress: topStringDirectionProgress,
 					particleTuningProgress: topStringParticleTuningProgress,
-					forceBlueParticles: isTuningSameAsReference,
-					isAwaitingInput: shouldAwaitTopStringInput,
-					targetFrequency: targetTopFrequency,
-					idleIndicatorSymbol: topStringIdleIndicatorSymbol
-				)
+						forceBlueParticles: isTuningSameAsReference,
+						isAwaitingInput: shouldAwaitTopStringInput,
+						targetFrequency: targetTopFrequency,
+						targetAnchorPosition: topStringAnchorPosition,
+						idleIndicatorSymbol: topStringIdleIndicatorSymbol
+					)
 				
 				FrequencySliderView(
 					frequency: $displayedFrequency,
-					particleFrequency: $rawDetectedFrequency,
+					particleFrequency: $immediateFrequency,
 					particleAmplitude: $rawDetectedAmplitude,
 					lockedFrequency: $lockedBottomFrequency,
 					activeLockedString: $activeLockedString,
@@ -303,11 +403,12 @@ struct TuningView: View {
 					directionIndicator: bottomStringDirectionIndicator,
 					directionProgress: bottomStringDirectionProgress,
 					particleTuningProgress: bottomStringParticleTuningProgress,
-					forceBlueParticles: isTuningSameAsReference,
-					isAwaitingInput: shouldAwaitBottomStringInput,
-					targetFrequency: targetBottomFrequency,
-					idleIndicatorSymbol: bottomStringIdleIndicatorSymbol
-				)
+						forceBlueParticles: isTuningSameAsReference,
+						isAwaitingInput: shouldAwaitBottomStringInput,
+						targetFrequency: targetBottomFrequency,
+						targetAnchorPosition: bottomStringAnchorPosition,
+						idleIndicatorSymbol: bottomStringIdleIndicatorSymbol
+					)
 				
 				Color.clear
 					.frame(height: 1)
@@ -320,9 +421,10 @@ struct TuningView: View {
 					.padding(.horizontal, 18)
 					.opacity(isTuningSameAsReference ? 1 : 0)
 					.allowsHitTesting(false)
+					}
+				.padding(contentHorizontalPadding)
+				
 			}
-			.padding()
-			
 		}
 				.safeAreaInset(edge: .bottom, spacing: 0) {
 					Group {
@@ -335,18 +437,18 @@ struct TuningView: View {
 					}
 					.padding(.horizontal)
 				}
-		.onReceive(detector.$frequency) { newFrequency in
+		.onReceive(detector.$stabilizedFrequency) { newFrequency in
 			guard newFrequency > 0 else { return }
 			
 			displayedFrequency = newFrequency
 			animateFrequencyText(to: newFrequency)
 		}
-		.onReceive(detector.$rawFrequency) { newFrequency in
-			rawDetectedFrequency = newFrequency
+		.onReceive(detector.$immediateFrequency) { newFrequency in
+			immediateFrequency = newFrequency
 		}
 		.onReceive(detector.$amplitude) { amplitude in
 			rawDetectedAmplitude = amplitude
-			updateStringSearchState(for: detector.frequency, amplitude: amplitude)
+			updateStringSearchState(for: detector.stabilizedFrequency, amplitude: amplitude)
 		}
 		.onChange(of: activeLockedString) {
 			if activeLockedString == nil {
