@@ -106,7 +106,7 @@ final class ToneDetector: ObservableObject {
 	// YIN and tracker thresholds are intentionally permissive at the detector
 	// level, then tightened by confidence checks and clustering below.
 	private let yinThreshold: Double = 0.12
-	private let minimumRMS: Double = 0.0025
+	private let minimumRMS: Double = 0.0015
 	private let minDetectableFrequency: Double = 60
 	private let maxDetectableFrequency: Double = 400
 	private let clusterToleranceRatio: Double = 0.028
